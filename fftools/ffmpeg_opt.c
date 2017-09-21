@@ -75,6 +75,9 @@ const HWAccel hwaccels[] = {
 #if CONFIG_CUVID
     { "cuvid", cuvid_init, HWACCEL_CUVID, AV_PIX_FMT_CUDA },
 #endif
+#if CONFIG_RPI
+    {  "rpi", rpi_init, HWACCEL_RPI, AV_PIX_FMT_RPI },
+#endif
     { 0 },
 };
 AVBufferRef *hw_device_ctx;

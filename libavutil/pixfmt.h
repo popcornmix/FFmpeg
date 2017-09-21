@@ -234,6 +234,11 @@ enum AVPixelFormat {
      */
     AV_PIX_FMT_CUDA,
 
+    /**
+     * HW acceleration through RPI.
+     */
+    AV_PIX_FMT_RPI,
+
     AV_PIX_FMT_0RGB,        ///< packed RGB 8:8:8, 32bpp, XRGBXRGB...   X=unused/undefined
     AV_PIX_FMT_RGB0,        ///< packed RGB 8:8:8, 32bpp, RGBXRGBX...   X=unused/undefined
     AV_PIX_FMT_0BGR,        ///< packed BGR 8:8:8, 32bpp, XBGRXBGR...   X=unused/undefined
