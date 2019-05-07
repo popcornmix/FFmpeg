@@ -1032,11 +1032,11 @@ static int rpi_hevc_free(AVCodecContext *avctx) {
 
 //////////////////////////////////////////////////////////////////////////////
 
-const AVHWAccel ff_hevc_rpi_hwaccel = {
-    .name           = "hevc_rpi",
+const AVHWAccel ff_hevc_rpi4_8_hwaccel = {
+    .name           = "hevc_rpi4_8",
     .type           = AVMEDIA_TYPE_VIDEO,
     .id             = AV_CODEC_ID_HEVC,
-    .pix_fmt        = AV_PIX_FMT_RPI,
+    .pix_fmt        = AV_PIX_FMT_RPI4_8,
     //.alloc_frame    = rpi_hevc_alloc_frame,
     .start_frame    = rpi_hevc_start_frame,
     .end_frame      = rpi_hevc_end_frame,
@@ -1046,6 +1046,22 @@ const AVHWAccel ff_hevc_rpi_hwaccel = {
     .priv_data_size = sizeof(RPI_T),
     .caps_internal  = HWACCEL_CAP_ASYNC_SAFE,
 };
+
+const AVHWAccel ff_hevc_rpi4_10_hwaccel = {
+    .name           = "hevc_rpi4_10",
+    .type           = AVMEDIA_TYPE_VIDEO,
+    .id             = AV_CODEC_ID_HEVC,
+    .pix_fmt        = AV_PIX_FMT_RPI4_10,
+    //.alloc_frame    = rpi_hevc_alloc_frame,
+    .start_frame    = rpi_hevc_start_frame,
+    .end_frame      = rpi_hevc_end_frame,
+    .decode_slice   = rpi_hevc_decode_slice,
+    .init           = rpi_hevc_init,
+    .uninit         = rpi_hevc_free,
+    .priv_data_size = sizeof(RPI_T),
+    .caps_internal  = HWACCEL_CAP_ASYNC_SAFE,
+};
+
 
 int rpi_init(AVCodecContext *avctx) {
     return 0;

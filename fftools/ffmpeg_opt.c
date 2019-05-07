@@ -76,7 +76,8 @@ const HWAccel hwaccels[] = {
     { "cuvid", cuvid_init, HWACCEL_CUVID, AV_PIX_FMT_CUDA },
 #endif
 #if CONFIG_RPI
-    {  "rpi", rpi_init, HWACCEL_RPI, AV_PIX_FMT_RPI },
+    {  "rpi", rpi_init, HWACCEL_RPI, AV_PIX_FMT_RPI4_8 },
+    {  "rpi", rpi_init, HWACCEL_RPI, AV_PIX_FMT_RPI4_10 },
 #endif
     { 0 },
 };

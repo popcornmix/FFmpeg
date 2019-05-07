@@ -272,11 +272,17 @@ display_init(const enum AVPixelFormat req_fmt, size_t x, size_t y, size_t w, siz
         MMAL_ES_FORMAT_T* const format = port->format;
         port->userdata = (struct MMAL_PORT_USERDATA_T *)de;
         port->buffer_num = DISPLAY_PORT_DEPTH;
-        format->encoding = fmt == AV_PIX_FMT_SAND128 || fmt == AV_PIX_FMT_RPI ? MMAL_ENCODING_YUVUV128 :
+        format->encoding =
+            fmt == AV_PIX_FMT_SAND128 ? MMAL_ENCODING_YUVUV128 :
+            fmt == AV_PIX_FMT_RPI4_8  ? MMAL_ENCODING_YUVUV128 :
+            fmt == AV_PIX_FMT_RPI4_10 ? MMAL_ENCODING_YUV10_COL :
             fmt == AV_PIX_FMT_SAND64_10 ? MMAL_ENCODING_YUVUV64_16 :
                 MMAL_ENCODING_I420;
         format->es->video.width = geo.stride_y;
-        format->es->video.height = (fmt == AV_PIX_FMT_SAND128 || fmt == AV_PIX_FMT_RPI || fmt == AV_PIX_FMT_SAND64_10) ?
+        format->es->video.height = (fmt == AV_PIX_FMT_SAND128 ||
+                                    fmt == AV_PIX_FMT_RPI4_8 ||
+                                    fmt == AV_PIX_FMT_RPI4_10 ||
+                                    fmt == AV_PIX_FMT_SAND64_10) ?
                                       (h + 15) & ~15 : geo.height_y;  // Magic
         format->es->video.crop.x = 0;
         format->es->video.crop.y = 0;
