@@ -9,6 +9,7 @@ HEADERS = ac3_parser.h                                                  \
           rpi_qpu.h                                                     \
           rpi_mailbox.h                                                 \
           rpi_zc.h                                                      \
+          rpi_ctrl_ffmpeg.h                                             \
           d3d11va.h                                                     \
           dirac.h                                                       \
           dv_profile.h                                                  \
@@ -54,6 +55,7 @@ OBJS = ac3_parser.o                                                     \
        rpi_qpu.o                                                        \
        rpi_mailbox.o                                                    \
        rpi_zc.o                                                         \
+       rpi_ctrl_ffmpeg.o                                                \
        vorbis_parser.o                                                  \
        xiph.o                                                           \
 

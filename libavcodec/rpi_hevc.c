@@ -15,6 +15,7 @@
 #include "rpi_zc.h"
 #include "rpi_qpu.h"
 
+#include "rpi_ctrl_ffmpeg.h"
 //////////////////////////////////////////////////////////////////////////////
 
 // Array of constants for scaling factors
@@ -936,24 +937,22 @@ static int rpi_hevc_decode_slice(
 // Bind to socket client
 
 static int open_socket_client(RPI_T *rpi, const char *so) {
-    rpi->dl_handle = dlopen(so, RTLD_LAZY);
-    if (!rpi->dl_handle) return 0;
-
-    return (*(void **) &rpi->ctrl_ffmpeg_init = dlsym(rpi->dl_handle, "rpi_ctrl_ffmpeg_init"))
-        && (*(void **) &rpi->apb_write        = dlsym(rpi->dl_handle, "rpi_apb_write"))
-        && (*(void **) &rpi->apb_write_addr   = dlsym(rpi->dl_handle, "rpi_apb_write_addr"))
-        && (*(void **) &rpi->apb_read         = dlsym(rpi->dl_handle, "rpi_apb_read"))
-        && (*(void **) &rpi->apb_read_drop    = dlsym(rpi->dl_handle, "rpi_apb_read_drop"))
-        && (*(void **) &rpi->axi_write        = dlsym(rpi->dl_handle, "rpi_axi_write"))
-        && (*(void **) &rpi->axi_read_alloc   = dlsym(rpi->dl_handle, "rpi_axi_read_alloc"))
-        && (*(void **) &rpi->axi_read_tx      = dlsym(rpi->dl_handle, "rpi_axi_read_tx"))
-        && (*(void **) &rpi->axi_read_rx      = dlsym(rpi->dl_handle, "rpi_axi_read_rx"))
-        && (*(void **) &rpi->axi_get_addr     = dlsym(rpi->dl_handle, "rpi_axi_get_addr"))
-        && (*(void **) &rpi->apb_dump_regs    = dlsym(rpi->dl_handle, "rpi_apb_dump_regs"))
-        && (*(void **) &rpi->axi_dump         = dlsym(rpi->dl_handle, "rpi_axi_dump"))
-        && (*(void **) &rpi->axi_flush        = dlsym(rpi->dl_handle, "rpi_axi_flush"))
-        && (*(void **) &rpi->wait_interrupt   = dlsym(rpi->dl_handle, "rpi_wait_interrupt"))
-        && (*(void **) &rpi->ctrl_ffmpeg_free = dlsym(rpi->dl_handle, "rpi_ctrl_ffmpeg_free"));
+     *(void **) &rpi->ctrl_ffmpeg_init = rpi_ctrl_ffmpeg_init;
+     *(void **) &rpi->apb_write        = rpi_apb_write;
+     *(void **) &rpi->apb_write_addr   = rpi_apb_write_addr;
+     *(void **) &rpi->apb_read         = rpi_apb_read;
+     *(void **) &rpi->apb_read_drop    = rpi_apb_read_drop;
+     *(void **) &rpi->axi_write        = rpi_axi_write;
+     *(void **) &rpi->axi_read_alloc   = rpi_axi_read_alloc;
+     *(void **) &rpi->axi_read_tx      = rpi_axi_read_tx;
+     *(void **) &rpi->axi_read_rx      = rpi_axi_read_rx;
+     *(void **) &rpi->axi_get_addr     = rpi_axi_get_addr;
+     *(void **) &rpi->apb_dump_regs    = rpi_apb_dump_regs;
+     *(void **) &rpi->axi_dump         = rpi_axi_dump;
+     *(void **) &rpi->axi_flush        = rpi_axi_flush;
+     *(void **) &rpi->wait_interrupt   = rpi_wait_interrupt;
+     *(void **) &rpi->ctrl_ffmpeg_free = rpi_ctrl_ffmpeg_free;
+    return 1;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -991,7 +990,6 @@ static int rpi_hevc_init(AVCodecContext *avctx) {
     err = rpi->ctrl_ffmpeg_init(NULL, &rpi->id);
     if (err) {
         av_log(NULL, AV_LOG_FATAL, "Could not connect to RPI server: %s\n", err);
-        dlclose(rpi->dl_handle);
         return AVERROR_EXTERNAL;
     }
 
@@ -1026,7 +1024,6 @@ static int rpi_hevc_free(AVCodecContext *avctx) {
     pthread_mutex_destroy(&rpi->mutex_phase1);
     pthread_mutex_destroy(&rpi->mutex_phase2);
     if (rpi->id && rpi->ctrl_ffmpeg_free) rpi->ctrl_ffmpeg_free(rpi->id);
-    if (rpi->dl_handle) dlclose(rpi->dl_handle);
     return 0;
 }
 
