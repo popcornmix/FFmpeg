@@ -305,6 +305,12 @@ static void wait_idle(RPI_T *rpi, int last) {
 
 static int check_status(RPI_T *rpi) {
     int status, c, p;
+
+    // this is the definition of successful completion of phase 1
+    // it assures that status register is zero and all blocks in each tile have completed
+    if (rpi->apb_read(rpi->id, RPI_CFSTATUS) == rpi->apb_read(rpi->id, RPI_CFNUM))
+	return 0;
+
     status = rpi->apb_read(rpi->id, RPI_STATUS);
     p = (status>>4)&1;
     c = (status>>3)&1;
@@ -314,7 +320,7 @@ static int check_status(RPI_T *rpi) {
         if (c) rpi->max_coeff64 += rpi->max_coeff64/2;
         return 1;
     }
-    return 0;
+    return 2;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -671,6 +677,7 @@ static int rpi_hevc_end_frame(AVCodecContext *avctx) {
 
     int i, a64, x;
     char *buf;
+    int status = 1;
 
     // End of phase 1 command compilation
     if (pps->entropy_coding_sync_enabled_flag) {
@@ -699,7 +706,8 @@ static int rpi_hevc_end_frame(AVCodecContext *avctx) {
         rpi->axi_dump(rpi->id, ((uint64_t)a64)<<6, rpi->cmd_len * sizeof(struct RPI_CMD));
         rpi->apb_write_addr(rpi->id, RPI_CFBASE, a64);
         rpi->wait_interrupt(rpi->id, 1);
-        if (check_status(rpi)==0) break; // No PU/COEFF overflow?
+        status = check_status(rpi);
+        if (status != 1) break; // No PU/COEFF overflow?
     }
     pthread_mutex_unlock(&rpi->mutex_phase1);
 
@@ -804,10 +812,12 @@ static int rpi_hevc_end_frame(AVCodecContext *avctx) {
 
     rpi->apb_dump_regs(rpi->id, 0x0, 32);
     rpi->apb_dump_regs(rpi->id, 0x8000, 24);
-    rpi->apb_write(rpi->id, RPI_NUMROWS, rpi->PicHeightInCtbsY);
-    rpi->apb_read_drop(rpi->id, RPI_NUMROWS); // Read back to confirm write has reached block
-    rpi->wait_interrupt(rpi->id, 2);
-
+    // only do phase if phase 1 completed without errors
+    if (status == 0) {
+        rpi->apb_write(rpi->id, RPI_NUMROWS, rpi->PicHeightInCtbsY);
+        rpi->apb_read_drop(rpi->id, RPI_NUMROWS); // Read back to confirm write has reached block
+        rpi->wait_interrupt(rpi->id, 2);
+    }
 //printf("%s: %dx%d %d\n", __FUNCTION__, f->width, f->height, f->linesize[0]);
 #if defined(AXI_BUFFERS)
     // Copy YUV output frame
