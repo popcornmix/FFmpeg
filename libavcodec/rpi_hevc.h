@@ -197,6 +197,7 @@ struct RPI_PROB probabilities;
     int         collocated_ref_idx;
     int         wpp_entry_x;
     int         wpp_entry_y;
+    int         mbox_fd;
 
     void *      dl_handle;
     void *      id;

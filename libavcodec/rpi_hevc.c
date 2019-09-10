@@ -16,6 +16,7 @@
 #include "rpi_qpu.h"
 
 #include "rpi_ctrl_ffmpeg.h"
+#include "rpi_mailbox.h"
 //////////////////////////////////////////////////////////////////////////////
 
 // Array of constants for scaling factors
@@ -1003,6 +1004,9 @@ static int rpi_hevc_init(AVCodecContext *avctx) {
         return AVERROR_EXTERNAL;
     }
 
+    rpi->mbox_fd = mbox_open();
+    mbox_request_clock(rpi->mbox_fd);
+
 #ifdef RPI_DISPLAY
   #include "rpi_zc.h"
     // Whilst FFmpegs init fn is only called once the close fn is called as
@@ -1034,6 +1038,10 @@ static int rpi_hevc_free(AVCodecContext *avctx) {
     pthread_mutex_destroy(&rpi->mutex_phase1);
     pthread_mutex_destroy(&rpi->mutex_phase2);
     if (rpi->id && rpi->ctrl_ffmpeg_free) rpi->ctrl_ffmpeg_free(rpi->id);
+
+    mbox_release_clock(rpi->mbox_fd);
+    mbox_close(rpi->mbox_fd);
+
     return 0;
 }
 

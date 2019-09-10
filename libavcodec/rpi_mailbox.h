@@ -55,4 +55,7 @@ extern unsigned mbox_mem_unlock(int file_desc, unsigned handle);
 
 int mbox_get_image_params(int fd, VC_IMAGE_T * img);
 
+int mbox_request_clock(int fd);
+int mbox_release_clock(int fd);
+
 #endif
