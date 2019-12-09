@@ -23,11 +23,17 @@
 
 #include <linux/videodev2.h>
 #include <sys/ioctl.h>
+
+#include "libavutil/hwcontext.h"
+#include "libavutil/hwcontext_drm.h"
 #include "libavutil/pixfmt.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/opt.h"
 #include "libavcodec/avcodec.h"
 #include "libavcodec/decode.h"
+
+#include "libavcodec/hwaccel.h"
+#include "libavcodec/internal.h"
 
 #include "v4l2_context.h"
 #include "v4l2_m2m.h"
@@ -86,8 +92,8 @@ static int v4l2_try_start(AVCodecContext *avctx)
     if (!capture->buffers) {
         ret = ff_v4l2_context_init(capture);
         if (ret) {
-            av_log(avctx, AV_LOG_DEBUG, "can't request output buffers\n");
-            return ret;
+            av_log(avctx, AV_LOG_ERROR, "can't request capture buffers\n");
+            return AVERROR(ENOMEM);
         }
     }
 
@@ -125,6 +131,8 @@ static int v4l2_prepare_decoder(V4L2m2mContext *s)
     return 0;
 }
 
+static AVPacket saved_avpkt = { 0 };
+
 static int v4l2_receive_frame(AVCodecContext *avctx, AVFrame *frame)
 {
     V4L2m2mContext *s = ((V4L2m2mPriv*)avctx->priv_data)->context;
@@ -133,9 +141,14 @@ static int v4l2_receive_frame(AVCodecContext *avctx, AVFrame *frame)
     AVPacket avpkt = {0};
     int ret;
 
-    ret = ff_decode_get_packet(avctx, &avpkt);
-    if (ret < 0 && ret != AVERROR_EOF)
-        return ret;
+    if (saved_avpkt.size) {
+	avpkt = saved_avpkt;
+	memset(&saved_avpkt, 0, sizeof(saved_avpkt));
+    } else {
+        ret = ff_decode_get_packet(avctx, &avpkt);
+        if (ret < 0 && ret != AVERROR_EOF)
+            return ret;
+    }
 
     if (s->draining)
         goto dequeue;
@@ -144,16 +157,26 @@ static int v4l2_receive_frame(AVCodecContext *avctx, AVFrame *frame)
     if (ret < 0) {
         if (ret != AVERROR(ENOMEM))
            return ret;
+
+        saved_avpkt = avpkt;
         /* no input buffers available, continue dequeing */
     }
 
     if (avpkt.size) {
         ret = v4l2_try_start(avctx);
-        if (ret)
+        if (ret) {
+            av_packet_unref(&avpkt);
+            /* cant recover */
+            if (ret == AVERROR(ENOMEM))
+                return ret;
+
             return 0;
+        }
     }
 
 dequeue:
+    if (!saved_avpkt.size)
+        av_packet_unref(&avpkt);
     return ff_v4l2_context_dequeue_frame(capture, frame);
 }
 
@@ -183,6 +206,15 @@ static av_cold int v4l2_decode_init(AVCodecContext *avctx)
     capture->av_codec_id = AV_CODEC_ID_RAWVIDEO;
     capture->av_pix_fmt = avctx->pix_fmt;
 
+    /* the client requests the codec to generate DRM frames:
+     *   - data[0] will therefore point to the returned AVDRMFrameDescriptor
+     *       check the ff_v4l2_buffer_to_avframe conversion function.
+     *   - the DRM frame format is passed in the DRM frame descriptor layer.
+     *       check the v4l2_get_drm_frame function.
+     */
+    if (ff_get_format(avctx, avctx->codec->pix_fmts) == AV_PIX_FMT_DRM_PRIME)
+        s->output_drm = 1;
+
     ret = ff_v4l2_m2m_codec_init(avctx);
     if (ret) {
         av_log(avctx, AV_LOG_ERROR, "can't configure decoder\n");
@@ -202,28 +234,38 @@ static const AVOption options[] = {
     { NULL},
 };
 
-#define M2MDEC(NAME, LONGNAME, CODEC, bsf_name) \
-static const AVClass v4l2_m2m_ ## NAME ## _dec_class = {\
-    .class_name = #NAME "_v4l2_m2m_decoder",\
-    .item_name  = av_default_item_name,\
-    .option     = options,\
-    .version    = LIBAVUTIL_VERSION_INT,\
-};\
-\
-AVCodec ff_ ## NAME ## _v4l2m2m_decoder = { \
-    .name           = #NAME "_v4l2m2m" ,\
-    .long_name      = NULL_IF_CONFIG_SMALL("V4L2 mem2mem " LONGNAME " decoder wrapper"),\
-    .type           = AVMEDIA_TYPE_VIDEO,\
-    .id             = CODEC ,\
-    .priv_data_size = sizeof(V4L2m2mPriv),\
-    .priv_class     = &v4l2_m2m_ ## NAME ## _dec_class,\
-    .init           = v4l2_decode_init,\
-    .receive_frame  = v4l2_receive_frame,\
-    .close          = ff_v4l2_m2m_codec_end,\
-    .bsfs           = bsf_name, \
-    .capabilities   = AV_CODEC_CAP_HARDWARE | AV_CODEC_CAP_DELAY, \
-    .wrapper_name   = "v4l2m2m", \
+static const AVCodecHWConfigInternal *v4l2_m2m_hw_configs[] = {
+    HW_CONFIG_INTERNAL(DRM_PRIME),
+    NULL
 };
+
+#define M2MDEC_CLASS(NAME) \
+    static const AVClass v4l2_m2m_ ## NAME ## _dec_class = { \
+        .class_name = #NAME "_v4l2_m2m_decoder", \
+        .item_name  = av_default_item_name, \
+        .option     = options, \
+        .version    = LIBAVUTIL_VERSION_INT, \
+    };
+
+#define M2MDEC(NAME, LONGNAME, CODEC, bsf_name) \
+    M2MDEC_CLASS(NAME) \
+    AVCodec ff_ ## NAME ## _v4l2m2m_decoder = { \
+        .name           = #NAME "_v4l2m2m" , \
+        .long_name      = NULL_IF_CONFIG_SMALL("V4L2 mem2mem " LONGNAME " decoder wrapper"), \
+        .type           = AVMEDIA_TYPE_VIDEO, \
+        .id             = CODEC , \
+        .priv_data_size = sizeof(V4L2m2mPriv), \
+        .priv_class     = &v4l2_m2m_ ## NAME ## _dec_class, \
+        .init           = v4l2_decode_init, \
+        .receive_frame  = v4l2_receive_frame, \
+        .close          = ff_v4l2_m2m_codec_end, \
+        .pix_fmts       = (const enum AVPixelFormat[]) { AV_PIX_FMT_DRM_PRIME, \
+                                                         AV_PIX_FMT_NONE}, \
+        .bsfs           = bsf_name, \
+        .hw_configs     = v4l2_m2m_hw_configs, \
+        .capabilities   = AV_CODEC_CAP_HARDWARE | AV_CODEC_CAP_DELAY, \
+        .wrapper_name   = "v4l2m2m", \
+    };
 
 M2MDEC(h264,  "H.264", AV_CODEC_ID_H264,       "h264_mp4toannexb");
 M2MDEC(hevc,  "HEVC",  AV_CODEC_ID_HEVC,       "hevc_mp4toannexb");
