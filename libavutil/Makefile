@@ -64,6 +64,7 @@ HEADERS = adler32.h                                                     \
           rational.h                                                    \
           replaygain.h                                                  \
           ripemd.h                                                      \
+	  rpi_sand_fns.h                                                \
           samplefmt.h                                                   \
           sha.h                                                         \
           sha512.h                                                      \
@@ -80,6 +81,7 @@ HEADERS = adler32.h                                                     \
           tea.h                                                         \
 
 HEADERS-$(CONFIG_LZO)                   += lzo.h
+HEADERS-$(CONFIG-RPI)                   += rpi_sand_fn_pw.h
 
 ARCH_HEADERS = bswap.h                                                  \
                intmath.h                                                \
@@ -161,9 +163,11 @@ OBJS-$(CONFIG_CUDA)                     += hwcontext_cuda.o
 OBJS-$(CONFIG_D3D11VA)                  += hwcontext_d3d11va.o
 OBJS-$(CONFIG_DXVA2)                    += hwcontext_dxva2.o
 OBJS-$(CONFIG_QSV)                   += hwcontext_qsv.o
+OBJS-$(CONFIG_SAND)                     += rpi_sand_fns.o
 OBJS-$(CONFIG_LIBDRM)                   += hwcontext_drm.o
 OBJS-$(CONFIG_LZO)                      += lzo.o
 OBJS-$(CONFIG_OPENCL)                   += hwcontext_opencl.o
+OBJS-$(CONFIG_RPI)                      += rpi_sand_fns.o
 OBJS-$(CONFIG_VAAPI)                    += hwcontext_vaapi.o
 OBJS-$(CONFIG_VIDEOTOOLBOX)             += hwcontext_videotoolbox.o
 OBJS-$(CONFIG_VDPAU)                    += hwcontext_vdpau.o
