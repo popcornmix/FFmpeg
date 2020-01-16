@@ -30,6 +30,7 @@
 #include "libavutil/avassert.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/imgutils.h"
+#include "libavutil/hwcontext_drm.h"
 #include "libavformat/internal.h"
 #include "avdevice.h"
 
@@ -114,14 +115,88 @@ fail:
     return AVERROR_UNKNOWN;
 }
 
+typedef struct drm_aux_s {
+    uint32_t bo_handles[4];
+    unsigned int fb_handle;
+} drm_aux_t;
+
 static int xv_write_packet(AVFormatContext *s, AVPacket *pkt)
 {
     AVFrame * const frame = (AVFrame *)pkt->data;
+    drm_display_env_t * const de = s->priv_data;
+
 #if TRACE_ALL
     av_log(s, AV_LOG_INFO, "%s\n", __func__);
 #endif
 
-    // *****
+    if (frame->format != AV_PIX_FMT_DRM_PRIME) {
+        av_log(s, AV_LOG_WARNING, "Frame (format=%d) not DRM_PRiME\n", frame->format);
+        return AVERROR(EINVAL);
+    }
+
+    {
+        const AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor*)frame->data[0];
+        AVBufferRef ** const pDrmBuf = &frame->opaque_ref;  // ** Abuse of this buf
+        drm_aux_t * da;
+
+        av_log(s, AV_LOG_INFO, "%s: fd=%d\n", __func__, desc->objects[0].fd);
+
+        // * This is an abuse of this field - but just for now
+        if (*pDrmBuf == NULL) {
+            uint32_t pitches[4] = {0};
+            uint32_t offsets[4] = {0};
+            uint64_t modifiers[4] = {0};
+            uint32_t bo_plane_handles[4] = {0};
+            int i, j, n;
+
+            *pDrmBuf = av_buffer_allocz(sizeof(drm_aux_t));
+            da = (drm_aux_t *)((*pDrmBuf)->data);
+
+            for (i = 0; i < desc->nb_objects; ++i) {
+                if (drmPrimeFDToHandle(de->drm_fd, desc->objects[i].fd, da->bo_handles + i) != 0) {
+                    av_log(s, AV_LOG_WARNING, "drmPrimeFDToHandle failed: %s\n", ERRSTR);
+                    return -1;
+                }
+            }
+
+            n = 0;
+            for (i = 0; i < desc->nb_layers; ++i) {
+                for (j = 0; j < desc->layers[i].nb_planes; ++j) {
+                    const AVDRMPlaneDescriptor * const p = desc->layers[i].planes + j;
+                    const AVDRMObjectDescriptor * const obj = desc->objects + p->object_index;
+                    pitches[n++] = p->pitch;
+                    offsets[n++] = p->offset;
+                    modifiers[n++] = obj->format_modifier;
+                    bo_plane_handles[n++] = da->bo_handles[p->object_index];
+                }
+            }
+
+            if (drmModeAddFB2WithModifiers(de->drm_fd,
+                                             av_frame_cropped_width(frame),
+                                             av_frame_cropped_height(frame),
+                                             desc->layers[0].format, bo_plane_handles,
+                                             pitches, offsets, modifiers,
+                                             &da->fb_handle, DRM_MODE_FB_MODIFIERS /** 0 if no mods */) != 0) {
+                av_log(s, AV_LOG_WARNING, "drmModeAddFB2WithModifiers failed: %s\n", ERRSTR);
+                return -1;
+            }
+        }
+        da = (drm_aux_t *)((*pDrmBuf)->data);
+
+        int ret = drmModeSetPlane(de->drm_fd, de->setup.planeId, de->setup.crtcId,
+                                  da->fb_handle, 0,
+                    de->setup.compose.x, de->setup.compose.y,
+                    de->setup.compose.width,
+                    de->setup.compose.height,
+                    0, 0,
+                    av_frame_cropped_width(frame) << 16,
+                    av_frame_cropped_height(frame) << 16);
+
+        if (ret != 0) {
+            av_log(s, AV_LOG_WARNING, "drmModeSetPlane failed: %s\n", ERRSTR);
+        }
+    }
+
     return 0;
 }
 
@@ -327,6 +402,8 @@ static int drm_vout_init(struct AVFormatContext * s)
     de->drm_fd = -1;
     de->con_id = 0;
     de->setup = (struct drm_setup){0};
+
+    de->setup.out_fourcc = DRM_FORMAT_NV12; // **** Need some sort of select
 
     if ((de->drm_fd = drmOpen(DRM_MODULE, NULL)) < 0)
     {
