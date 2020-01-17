@@ -136,12 +136,13 @@ static int xv_write_packet(AVFormatContext *s, AVPacket *pkt)
 
     {
         const AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor*)frame->data[0];
-        AVBufferRef ** const pDrmBuf = &frame->opaque_ref;  // ** Abuse of this buf
+        AVBufferRef ** const pDrmBuf = frame->buf + 3;  // ** Abuse of this buf
         drm_aux_t * da;
 
-        av_log(s, AV_LOG_INFO, "%s: fd=%d\n", __func__, desc->objects[0].fd);
-
         // * This is an abuse of this field - but just for now
+        // *** The intent was that we would only need to do this once for every
+        // buffer but this doesn't dig back far enough to get the original AVFrame
+        // so it is null every time :-(
         if (*pDrmBuf == NULL) {
             uint32_t pitches[4] = {0};
             uint32_t offsets[4] = {0};
@@ -164,12 +165,38 @@ static int xv_write_packet(AVFormatContext *s, AVPacket *pkt)
                 for (j = 0; j < desc->layers[i].nb_planes; ++j) {
                     const AVDRMPlaneDescriptor * const p = desc->layers[i].planes + j;
                     const AVDRMObjectDescriptor * const obj = desc->objects + p->object_index;
-                    pitches[n++] = p->pitch;
-                    offsets[n++] = p->offset;
-                    modifiers[n++] = obj->format_modifier;
-                    bo_plane_handles[n++] = da->bo_handles[p->object_index];
+                    pitches[n] = p->pitch;
+                    offsets[n] = p->offset;
+                    modifiers[n] = obj->format_modifier;
+                    bo_plane_handles[n] = da->bo_handles[p->object_index];
+                    ++n;
                 }
             }
+
+#if 1
+            av_log(s, AV_LOG_INFO, "%dx%d, fmt: %x, boh=%d,%d,%d,%d, pitch=%d,%d,%d,%d,"
+                   " offset=%d,%d,%d,%d, mod=%llx,%llx,%llx,%llx\n",
+                   av_frame_cropped_width(frame),
+                   av_frame_cropped_height(frame),
+                   desc->layers[0].format,
+                   bo_plane_handles[0],
+                   bo_plane_handles[1],
+                   bo_plane_handles[2],
+                   bo_plane_handles[3],
+                   pitches[0],
+                   pitches[1],
+                   pitches[2],
+                   pitches[3],
+                   offsets[0],
+                   offsets[1],
+                   offsets[2],
+                   offsets[3],
+                   (long long)modifiers[0],
+                   (long long)modifiers[1],
+                   (long long)modifiers[2],
+                   (long long)modifiers[3]
+                   );
+#endif
 
             if (drmModeAddFB2WithModifiers(de->drm_fd,
                                              av_frame_cropped_width(frame),

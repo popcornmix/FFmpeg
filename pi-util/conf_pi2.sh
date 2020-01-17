@@ -24,7 +24,6 @@ INC_PREFIX=$USR_PREFIX/include/arm-linux-gnueabihf
  --disable-thumb\
  --enable-mmal\
  --enable-rpi\
- --enable-shared\
  --enable-v4l2-request\
  --enable-libdrm\
  --enable-libudev\
