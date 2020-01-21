@@ -232,7 +232,6 @@ static int drm_transfer_data_from(AVHWFramesContext *hwfc,
     if (hwfc->sw_format == AV_PIX_FMT_RPI4_8 && dst->format == AV_PIX_FMT_YUV420P) {
         unsigned int coffset = ((src->height + 15) & ~15);
         unsigned int stride2 = coffset * 3 / 2;
-#if 0
         av_rpi_sand_to_planar_y8(dst->data[0], dst->linesize[0],
                                  map->data[0],
                                  128, stride2,
@@ -242,7 +241,6 @@ static int drm_transfer_data_from(AVHWFramesContext *hwfc,
                                  map->data[0] + coffset * 128,
                                  128, stride2,
                                  0, 0, dst->width / 2, dst->height / 2);  // *** ??? crop
-#endif
     }
     else if (hwfc->sw_format == AV_PIX_FMT_RPI4_10 && dst->format == AV_PIX_FMT_YUV420P10LE) {
         unsigned int coffset = ((src->height + 15) & ~15);
