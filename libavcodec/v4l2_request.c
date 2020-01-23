@@ -169,11 +169,11 @@ static int v4l2_request_set_drm_descriptor(V4L2RequestDescriptor *req, struct v4
 #warning DRM mods etc need work!
     case V4L2_PIX_FMT_SAND8:
         layer->format = DRM_FORMAT_NV12;  //?????
-        desc->objects[0].format_modifier = DRM_FORMAT_MOD_BROADCOM_SAND128_COL_HEIGHT(format->fmt.pix.height * 3 / 2);
+        desc->objects[0].format_modifier = DRM_FORMAT_MOD_BROADCOM_SAND128_COL_HEIGHT(format->fmt.pix.bytesperline);
         break;
     case V4L2_PIX_FMT_SAND30:
         layer->format = DRM_FORMAT_P010;  //????
-        desc->objects[0].format_modifier = DRM_FORMAT_MOD_BROADCOM_SAND128_COL_HEIGHT(format->fmt.pix.height * 3 / 2);
+        desc->objects[0].format_modifier = DRM_FORMAT_MOD_BROADCOM_SAND128_COL_HEIGHT(format->fmt.pix.bytesperline);
         break;
 #ifdef DRM_FORMAT_MOD_ALLWINNER_TILED
     case V4L2_PIX_FMT_SUNXI_TILED_NV12:

@@ -125,6 +125,9 @@ static int drm_map_frame(AVHWFramesContext *hwfc,
     if (flags & AV_HWFRAME_MAP_WRITE)
         mmap_prot |= PROT_WRITE;
 
+    if (dst->format == AV_PIX_FMT_NONE)
+        dst->format = hwfc->sw_format;
+
     av_assert0(desc->nb_objects <= AV_DRM_MAX_PLANES);
     for (i = 0; i < desc->nb_objects; i++) {
         addr = mmap(NULL, desc->objects[i].size, mmap_prot, MAP_SHARED,
@@ -153,6 +156,15 @@ static int drm_map_frame(AVHWFramesContext *hwfc,
         }
     }
     av_assert0(plane <= AV_DRM_MAX_PLANES);
+
+    if (av_rpi_is_sand_frame(dst)) {
+        // As it stands the sand formats hold stride2 in linesize[3]
+        // linesize[0] & [1] contain stride1 which is always 128 for everything we do
+        // * Arguably this should be reworked s.t. stride2 is in linesize[0] & [1]
+        dst->linesize[3] = dst->linesize[0];
+        dst->linesize[0] = 128;
+        dst->linesize[1] = 128;
+    }
 
     dst->width  = src->width;
     dst->height = src->height;
@@ -187,7 +199,6 @@ static int drm_transfer_get_formats(AVHWFramesContext *ctx,
     if (!pix_fmts)
         return AVERROR(ENOMEM);
 
-    av_log(ctx, AV_LOG_INFO, "pix_fmt(ff)=%#x\n", ctx->sw_format);
     // **** Offer native sand too ????
     pix_fmts[0] = ctx->sw_format == AV_PIX_FMT_RPI4_8 || ctx->sw_format == AV_PIX_FMT_SAND128 ?
             AV_PIX_FMT_YUV420P :
@@ -206,32 +217,36 @@ static int drm_transfer_data_from(AVHWFramesContext *hwfc,
     AVFrame *map;
     int err;
 
-    av_log(hwfc, AV_LOG_INFO, "<<< %s\n", __func__);
-
     if (dst->width > hwfc->width || dst->height > hwfc->height)
         return AVERROR(EINVAL);
 
     map = av_frame_alloc();
     if (!map)
         return AVERROR(ENOMEM);
-    map->format = dst->format;
 
+    map->format = AV_PIX_FMT_NONE;
     err = drm_map_frame(hwfc, map, src, AV_HWFRAME_MAP_READ);
     if (err)
         goto fail;
 
     dst->width  = map->width;
     dst->height = map->height;
-
-//    av_log(hwfc, AV_LOG_INFO, "%s: src fmt=%d (%d), dst fmt=%d (%d) s=%dx%d, d=%dx%d l=%d/%d/%d\n", __func__,
-//           hwfc->sw_format, AV_PIX_FMT_RPI4_8, dst->format, AV_PIX_FMT_YUV420P10LE,
-//           src->width, src->height, dst->width, dst->height,
-//           dst->linesize[0],
-//           dst->linesize[1],
-//           dst->linesize[2]);
-    if (hwfc->sw_format == AV_PIX_FMT_RPI4_8 && dst->format == AV_PIX_FMT_YUV420P) {
+#if 0
+    av_log(hwfc, AV_LOG_INFO, "%s: src fmt=%d (%d), dst fmt=%d (%d) s=%dx%d l=%d/%d/%d/%d, d=%dx%d l=%d/%d/%d\n", __func__,
+           hwfc->sw_format, AV_PIX_FMT_RPI4_8, dst->format, AV_PIX_FMT_YUV420P10LE,
+           map->width, map->height,
+           map->linesize[0],
+           map->linesize[1],
+           map->linesize[2],
+           map->linesize[3],
+           dst->width, dst->height,
+           dst->linesize[0],
+           dst->linesize[1],
+           dst->linesize[2]);
+#endif
+    if (map->format == AV_PIX_FMT_RPI4_8 && dst->format == AV_PIX_FMT_YUV420P) {
         unsigned int coffset = ((src->height + 15) & ~15);
-        unsigned int stride2 = coffset * 3 / 2;
+        unsigned int stride2 = map->linesize[3];
         av_rpi_sand_to_planar_y8(dst->data[0], dst->linesize[0],
                                  map->data[0],
                                  128, stride2,
@@ -242,7 +257,7 @@ static int drm_transfer_data_from(AVHWFramesContext *hwfc,
                                  128, stride2,
                                  0, 0, dst->width / 2, dst->height / 2);  // *** ??? crop
     }
-    else if (hwfc->sw_format == AV_PIX_FMT_RPI4_10 && dst->format == AV_PIX_FMT_YUV420P10LE) {
+    else if (map->format == AV_PIX_FMT_RPI4_10 && dst->format == AV_PIX_FMT_YUV420P10LE) {
         unsigned int coffset = ((src->height + 15) & ~15);
         unsigned int stride2 = coffset * 3 / 2;
 //        memset(dst->data[0], 0, dst->height * dst->linesize[0]);
