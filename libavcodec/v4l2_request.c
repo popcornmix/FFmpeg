@@ -16,7 +16,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include <drm_fourcc.h>
+#include <drm/drm_fourcc.h>
 #include <linux/media.h>
 #include <sys/mman.h>
 #include <sys/types.h>
@@ -166,13 +166,12 @@ static int v4l2_request_set_drm_descriptor(V4L2RequestDescriptor *req, struct v4
         layer->format = DRM_FORMAT_NV12;
         desc->objects[0].format_modifier = DRM_FORMAT_MOD_LINEAR;
         break;
-#warning DRM mods etc need work!
     case V4L2_PIX_FMT_SAND8:
-        layer->format = DRM_FORMAT_NV12;  //?????
+        layer->format = DRM_FORMAT_NV12;
         desc->objects[0].format_modifier = DRM_FORMAT_MOD_BROADCOM_SAND128_COL_HEIGHT(format->fmt.pix.bytesperline);
         break;
     case V4L2_PIX_FMT_SAND30:
-        layer->format = DRM_FORMAT_P010;  //????
+        layer->format = DRM_FORMAT_P030;
         desc->objects[0].format_modifier = DRM_FORMAT_MOD_BROADCOM_SAND128_COL_HEIGHT(format->fmt.pix.bytesperline);
         break;
 #ifdef DRM_FORMAT_MOD_ALLWINNER_TILED
@@ -196,10 +195,17 @@ static int v4l2_request_set_drm_descriptor(V4L2RequestDescriptor *req, struct v4
     layer->planes[0].offset = 0;
     layer->planes[0].pitch = V4L2_TYPE_IS_MULTIPLANAR(format->type) ? format->fmt.pix_mp.plane_fmt[0].bytesperline : format->fmt.pix.bytesperline;
 
-    if (pixelformat == V4L2_PIX_FMT_SAND8 || pixelformat == V4L2_PIX_FMT_SAND30) {
+    if (pixelformat == V4L2_PIX_FMT_SAND8) {
         layer->planes[1].object_index = 0;
         layer->planes[1].offset = format->fmt.pix.height * 128;
-        layer->planes[1].pitch = layer->planes[0].pitch;
+        layer->planes[0].pitch = format->fmt.pix.width;
+        layer->planes[1].pitch = format->fmt.pix.width;
+    }
+    else if (pixelformat == V4L2_PIX_FMT_SAND30) {
+        layer->planes[1].object_index = 0;
+        layer->planes[1].offset = format->fmt.pix.height * 128;
+        layer->planes[0].pitch = format->fmt.pix.width * 2; // Lies but it keeps DRM import happy
+        layer->planes[1].pitch = format->fmt.pix.width * 2;
     }
     else {
         layer->planes[1].object_index = 0;

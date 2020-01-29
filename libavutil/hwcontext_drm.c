@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include <drm.h>
+#include <drm/drm_fourcc.h>
 #include <xf86drm.h>
 
 #include "avassert.h"
@@ -157,21 +158,24 @@ static int drm_map_frame(AVHWFramesContext *hwfc,
     }
     av_assert0(plane <= AV_DRM_MAX_PLANES);
 
-    if (av_rpi_is_sand_frame(dst)) {
-        // As it stands the sand formats hold stride2 in linesize[3]
-        // linesize[0] & [1] contain stride1 which is always 128 for everything we do
-        // * Arguably this should be reworked s.t. stride2 is in linesize[0] & [1]
-        dst->linesize[3] = dst->linesize[0];
-        dst->linesize[0] = 128;
-        dst->linesize[1] = 128;
-    }
-
     dst->width  = src->width;
     dst->height = src->height;
     dst->crop_top    = src->crop_top;
     dst->crop_bottom = src->crop_bottom;
     dst->crop_left   = src->crop_left;
     dst->crop_right  = src->crop_right;
+
+    // Rework for sand frames
+    if (av_rpi_is_sand_frame(dst)) {
+        // As it stands the sand formats hold stride2 in linesize[3]
+        // linesize[0] & [1] contain stride1 which is always 128 for everything we do
+        // * Arguably this should be reworked s.t. stride2 is in linesize[0] & [1]
+        dst->linesize[3] = fourcc_mod_broadcom_param(desc->objects[0].format_modifier);
+        dst->linesize[0] = 128;
+        dst->linesize[1] = 128;
+        // *** Are we sure src->height is actually what we want ???
+    }
+
 
     err = ff_hwframe_map_create(src->hw_frames_ctx, dst, src,
                                 &drm_unmap_frame, map);
@@ -245,7 +249,7 @@ static int drm_transfer_data_from(AVHWFramesContext *hwfc,
            dst->linesize[2]);
 #endif
     if (map->format == AV_PIX_FMT_RPI4_8 && dst->format == AV_PIX_FMT_YUV420P) {
-        unsigned int coffset = ((src->height + 15) & ~15);
+//        unsigned int coffset = ((src->height + 15) & ~15);
         unsigned int stride2 = map->linesize[3];
         av_rpi_sand_to_planar_y8(dst->data[0], dst->linesize[0],
                                  map->data[0],
@@ -253,13 +257,13 @@ static int drm_transfer_data_from(AVHWFramesContext *hwfc,
                                  0, 0, dst->width, dst->height);  // *** ??? crop
         av_rpi_sand_to_planar_c8(dst->data[1], dst->linesize[1],
                                  dst->data[2], dst->linesize[2],
-                                 map->data[0] + coffset * 128,
+                                 map->data[1],
                                  128, stride2,
                                  0, 0, dst->width / 2, dst->height / 2);  // *** ??? crop
     }
     else if (map->format == AV_PIX_FMT_RPI4_10 && dst->format == AV_PIX_FMT_YUV420P10LE) {
-        unsigned int coffset = ((src->height + 15) & ~15);
-        unsigned int stride2 = coffset * 3 / 2;
+//        unsigned int coffset = ((src->height + 15) & ~15);
+        unsigned int stride2 = map->linesize[3];
 //        memset(dst->data[0], 0, dst->height * dst->linesize[0]);
 //        memset(dst->data[1], 0, dst->height / 2 * dst->linesize[1]);
 //        memset(dst->data[2], 0, dst->height / 2 * dst->linesize[2]);
@@ -269,7 +273,7 @@ static int drm_transfer_data_from(AVHWFramesContext *hwfc,
                                  0, 0, dst->width, dst->height);  // *** ??? crop
         av_rpi_sand30_to_planar_c16(dst->data[1], dst->linesize[1],
                                  dst->data[2], dst->linesize[2],
-                                 map->data[0] + coffset * 128,
+                                 map->data[1],
                                  128, stride2,
                                  0, 0, dst->width / 2, dst->height / 2);  // *** ??? crop
     }

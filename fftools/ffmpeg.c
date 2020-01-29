@@ -2417,7 +2417,7 @@ static int decode_video(InputStream *ist, AVPacket *pkt, int *got_output, int64_
         decoded_frame->top_field_first = ist->top_field_first;
 
     ist->frames_decoded++;
-#if 1
+#if 0
     if (ist->hwaccel_retrieve_data && decoded_frame->format == ist->hwaccel_pix_fmt) {
         err = ist->hwaccel_retrieve_data(ist->dec_ctx, decoded_frame);
         if (err < 0)
