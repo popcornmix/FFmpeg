@@ -228,13 +228,12 @@ static int drm_transfer_data_from(AVHWFramesContext *hwfc,
     if (!map)
         return AVERROR(ENOMEM);
 
+    // Map to default
     map->format = AV_PIX_FMT_NONE;
     err = drm_map_frame(hwfc, map, src, AV_HWFRAME_MAP_READ);
     if (err)
         goto fail;
 
-    dst->width  = map->width;
-    dst->height = map->height;
 #if 0
     av_log(hwfc, AV_LOG_INFO, "%s: src fmt=%d (%d), dst fmt=%d (%d) s=%dx%d l=%d/%d/%d/%d, d=%dx%d l=%d/%d/%d\n", __func__,
            hwfc->sw_format, AV_PIX_FMT_RPI4_8, dst->format, AV_PIX_FMT_YUV420P10LE,
@@ -248,36 +247,51 @@ static int drm_transfer_data_from(AVHWFramesContext *hwfc,
            dst->linesize[1],
            dst->linesize[2]);
 #endif
-    if (map->format == AV_PIX_FMT_RPI4_8 && dst->format == AV_PIX_FMT_YUV420P) {
-//        unsigned int coffset = ((src->height + 15) & ~15);
+    if (av_rpi_is_sand_frame(map)) {
         unsigned int stride2 = map->linesize[3];
-        av_rpi_sand_to_planar_y8(dst->data[0], dst->linesize[0],
-                                 map->data[0],
-                                 128, stride2,
-                                 0, 0, dst->width, dst->height);  // *** ??? crop
-        av_rpi_sand_to_planar_c8(dst->data[1], dst->linesize[1],
-                                 dst->data[2], dst->linesize[2],
-                                 map->data[1],
-                                 128, stride2,
-                                 0, 0, dst->width / 2, dst->height / 2);  // *** ??? crop
-    }
-    else if (map->format == AV_PIX_FMT_RPI4_10 && dst->format == AV_PIX_FMT_YUV420P10LE) {
-//        unsigned int coffset = ((src->height + 15) & ~15);
-        unsigned int stride2 = map->linesize[3];
-//        memset(dst->data[0], 0, dst->height * dst->linesize[0]);
-//        memset(dst->data[1], 0, dst->height / 2 * dst->linesize[1]);
-//        memset(dst->data[2], 0, dst->height / 2 * dst->linesize[2]);
-        av_rpi_sand30_to_planar_y16(dst->data[0], dst->linesize[0],
-                                 map->data[0],
-                                 128, stride2,
-                                 0, 0, dst->width, dst->height);  // *** ??? crop
-        av_rpi_sand30_to_planar_c16(dst->data[1], dst->linesize[1],
-                                 dst->data[2], dst->linesize[2],
-                                 map->data[1],
-                                 128, stride2,
-                                 0, 0, dst->width / 2, dst->height / 2);  // *** ??? crop
+        const unsigned int w = FFMIN(dst->width, av_frame_cropped_width(map));
+        const unsigned int h = FFMIN(dst->height, av_frame_cropped_height(map));
+
+        if (map->format == AV_PIX_FMT_RPI4_8 && dst->format == AV_PIX_FMT_YUV420P) {
+            av_rpi_sand_to_planar_y8(dst->data[0], dst->linesize[0],
+                                     map->data[0],
+                                     128, stride2,
+                                     map->crop_left, map->crop_top,
+                                     w, h);
+            av_rpi_sand_to_planar_c8(dst->data[1], dst->linesize[1],
+                                     dst->data[2], dst->linesize[2],
+                                     map->data[1],
+                                     128, stride2,
+                                     map->crop_left / 2, map->crop_top / 2,
+                                     w / 2, h / 2);
+        }
+        else if (map->format == AV_PIX_FMT_RPI4_10 && dst->format == AV_PIX_FMT_YUV420P10LE) {
+            av_rpi_sand30_to_planar_y16(dst->data[0], dst->linesize[0],
+                                     map->data[0],
+                                     128, stride2,
+                                     map->crop_left, map->crop_top,
+                                     w, h);  // *** ??? crop
+            av_rpi_sand30_to_planar_c16(dst->data[1], dst->linesize[1],
+                                     dst->data[2], dst->linesize[2],
+                                     map->data[1],
+                                     128, stride2,
+                                     map->crop_left / 2, map->crop_top / 2,
+                                     w / 2, h / 2);
+        }
+        else
+        {
+            av_log(hwfc, AV_LOG_ERROR, "%s: Incompatible output pixfmt for sand\n", __func__);
+            err = AVERROR(EINVAL);
+            goto fail;
+        }
+
+        dst->width = w;
+        dst->height = h;
     }
     else {
+        // Kludge mapped h/w s.t. frame_copy works
+        map->width  = dst->width;
+        map->height = dst->height;
         err = av_frame_copy(dst, map);
     }
 
