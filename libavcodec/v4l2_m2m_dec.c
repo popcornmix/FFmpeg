@@ -212,7 +212,7 @@ static av_cold int v4l2_decode_init(AVCodecContext *avctx)
      *   - the DRM frame format is passed in the DRM frame descriptor layer.
      *       check the v4l2_get_drm_frame function.
      */
-    if (ff_get_format(avctx, avctx->codec->pix_fmts) == AV_PIX_FMT_DRM_PRIME)
+    //if (ff_get_format(avctx, avctx->codec->pix_fmts) == AV_PIX_FMT_DRM_PRIME)
         s->output_drm = 1;
 
     ret = ff_v4l2_m2m_codec_init(avctx);

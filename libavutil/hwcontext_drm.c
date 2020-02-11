@@ -234,7 +234,7 @@ static int drm_transfer_data_from(AVHWFramesContext *hwfc,
     if (err)
         goto fail;
 
-#if 0
+#if 1
     av_log(hwfc, AV_LOG_INFO, "%s: src fmt=%d (%d), dst fmt=%d (%d) s=%dx%d l=%d/%d/%d/%d, d=%dx%d l=%d/%d/%d\n", __func__,
            hwfc->sw_format, AV_PIX_FMT_RPI4_8, dst->format, AV_PIX_FMT_YUV420P10LE,
            map->width, map->height,
