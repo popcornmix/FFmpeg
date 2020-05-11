@@ -165,6 +165,7 @@ static int drm_map_frame(AVHWFramesContext *hwfc,
     dst->crop_left   = src->crop_left;
     dst->crop_right  = src->crop_right;
 
+#if CONFIG_SAND
     // Rework for sand frames
     if (av_rpi_is_sand_frame(dst)) {
         // As it stands the sand formats hold stride2 in linesize[3]
@@ -175,6 +176,7 @@ static int drm_map_frame(AVHWFramesContext *hwfc,
         dst->linesize[1] = 128;
         // *** Are we sure src->height is actually what we want ???
     }
+#endif
 
 
     err = ff_hwframe_map_create(src->hw_frames_ctx, dst, src,
@@ -247,6 +249,7 @@ static int drm_transfer_data_from(AVHWFramesContext *hwfc,
            dst->linesize[1],
            dst->linesize[2]);
 #endif
+#if CONFIG_SAND
     if (av_rpi_is_sand_frame(map)) {
         unsigned int stride2 = map->linesize[3];
         const unsigned int w = FFMIN(dst->width, av_frame_cropped_width(map));
@@ -288,7 +291,9 @@ static int drm_transfer_data_from(AVHWFramesContext *hwfc,
         dst->width = w;
         dst->height = h;
     }
-    else {
+    else
+#endif
+    {
         // Kludge mapped h/w s.t. frame_copy works
         map->width  = dst->width;
         map->height = dst->height;
