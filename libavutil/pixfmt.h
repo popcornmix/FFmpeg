@@ -234,11 +234,6 @@ enum AVPixelFormat {
      */
     AV_PIX_FMT_CUDA,
 
-    /**
-     * HW acceleration through RPI.
-     */
-    AV_PIX_FMT_RPI,
-
     AV_PIX_FMT_0RGB,        ///< packed RGB 8:8:8, 32bpp, XRGBXRGB...   X=unused/undefined
     AV_PIX_FMT_RGB0,        ///< packed RGB 8:8:8, 32bpp, RGBXRGBX...   X=unused/undefined
     AV_PIX_FMT_0BGR,        ///< packed BGR 8:8:8, 32bpp, XBGRXBGR...   X=unused/undefined
@@ -352,6 +347,11 @@ enum AVPixelFormat {
 
     AV_PIX_FMT_NV24,      ///< planar YUV 4:4:4, 24bpp, 1 plane for Y and 1 plane for the UV components, which are interleaved (first byte U and the following byte V)
     AV_PIX_FMT_NV42,      ///< as above, but U and V bytes are swapped
+
+    /**
+     * HW acceleration through RPI.
+     */
+    AV_PIX_FMT_RPI,
 
 // RPI - not on ifdef so can be got at by calling progs
     AV_PIX_FMT_SAND128,    ///< 4:2:0  8-bit 128x*Y stripe, 64x*UV stripe, then next x stripe, mysterious padding
