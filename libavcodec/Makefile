@@ -379,7 +379,6 @@ OBJS-$(CONFIG_HEVC_RPI_DECODER)        += rpi_hevcdec.o rpi_hevc_mvs.o \
                                           rpi_hevc_shader.o rpi_hevc_shader_template.o       \
                                           rpi_hevc_parse.o h2645_parse.o rpi_hevc_ps.o \
                                           rpi_hevc_sei.o rpi_hevc_data.o rpi_qpu.o rpi_mem.o
-OBJS-$(CONFIG_HEVC_CUVID_DECODER)      += cuvid.o
 OBJS-$(CONFIG_HEVC_AMF_ENCODER)        += amfenc_hevc.o
 OBJS-$(CONFIG_HEVC_CUVID_DECODER)      += cuviddec.o
 OBJS-$(CONFIG_HEVC_MEDIACODEC_DECODER) += mediacodecdec.o
