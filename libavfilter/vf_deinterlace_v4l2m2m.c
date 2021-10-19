@@ -103,6 +103,7 @@ typedef struct DeintV4L2M2MContextShared {
      */
     AVFrame *cur_in_frame;
     AVFrame *prev_in_frame;
+    AVFrame *prev_prev_in_frame;
     unsigned int field_order;
     int64_t last_pts;
     int64_t frame_interval;
@@ -686,6 +687,9 @@ static void deint_v4l2m2m_destroy_context(DeintV4L2M2MContextShared *ctx)
 	if (ctx->prev_in_frame)
 		av_frame_free(&ctx->prev_in_frame);
 
+	if (ctx->prev_prev_in_frame)
+		av_frame_free(&ctx->prev_prev_in_frame);
+
         av_buffer_unref(&ctx->hw_frames_ctx);
 
         if (capture->buffers)
@@ -974,6 +978,10 @@ static int deint_v4l2m2m_filter_frame(AVFilterLink *link, AVFrame *in)
     if (ctx->prev_in_frame)
 	av_frame_free(&ctx->prev_in_frame);
 
+    if (ctx->prev_prev_in_frame)
+	av_frame_free(&ctx->prev_prev_in_frame);
+
+    ctx->prev_prev_in_frame = ctx->prev_in_frame;
     ctx->prev_in_frame = in;
     ctx->cur_in_frame = NULL;
 
@@ -1000,6 +1008,7 @@ static av_cold int deint_v4l2m2m_init(AVFilterContext *avctx)
     ctx->field_order = V4L2_FIELD_ANY;
     ctx->cur_in_frame = NULL;
     ctx->prev_in_frame = NULL;
+    ctx->prev_prev_in_frame = NULL;
     ctx->last_pts = 0;
     ctx->frame_interval = 1000000 / 60;
     atomic_init(&ctx->refcount, 1);
