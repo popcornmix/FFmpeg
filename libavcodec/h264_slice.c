@@ -122,6 +122,7 @@ static void release_unused_pictures(H264Context *h, int remove_current)
     /* release non reference frames */
     for (i = 0; i < H264_MAX_PICTURE_COUNT; i++) {
         if (h->DPB[i].f->buf[0] && !h->DPB[i].reference &&
+            &h->DPB[i] != h->next_output_pic &&
             (remove_current || &h->DPB[i] != h->cur_pic_ptr)) {
             ff_h264_unref_picture(&h->DPB[i]);
         }
