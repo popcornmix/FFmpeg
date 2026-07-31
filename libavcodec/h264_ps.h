@@ -39,6 +39,36 @@
 #define MAX_LOG2_MAX_FRAME_NUM    (12 + 4)
 
 /**
+ * Maximum number of MVC views we support decoding. The syntax allows up to
+ * 1024; as for MV-HEVC only stereo is implemented.
+ */
+#define H264_MAX_MVC_VIEWS      2
+/** num_anchor_refs_lX / num_non_anchor_refs_lX are in [0, 15], cf. H.7.4.2.1.4 */
+#define H264_MAX_MVC_REFS      16
+
+/**
+ * MVC extension of the subset sequence parameter set, cf. H.7.3.2.1.4
+ * seq_parameter_set_mvc_extension().
+ *
+ * Arrays documented as [voidx] are indexed by view order index (VOIdx), i.e.
+ * the position of a view in view_id[]. The inter-view reference arrays hold
+ * view_id values, not VOIdx values, and are only meaningful for voidx >= 1.
+ */
+typedef struct SPSMVCExt {
+    /**
+     * num_views_minus1 + 1, or 0 if this subset SPS carries no usable MVC
+     * extension (absent, or more views than we support).
+     */
+    int      num_views;
+    uint16_t view_id[H264_MAX_MVC_VIEWS];
+
+    uint8_t  num_anchor_refs    [2][H264_MAX_MVC_VIEWS];
+    uint16_t anchor_ref         [2][H264_MAX_MVC_VIEWS][H264_MAX_MVC_REFS];
+    uint8_t  num_non_anchor_refs[2][H264_MAX_MVC_VIEWS];
+    uint16_t non_anchor_ref     [2][H264_MAX_MVC_VIEWS][H264_MAX_MVC_REFS];
+} SPSMVCExt;
+
+/**
  * Sequence parameter set
  */
 typedef struct SPS {
@@ -102,6 +132,9 @@ typedef struct SPS {
     int constraint_set_flags;             ///< constraint_set[0-3]_flag
     uint8_t data[4096];
     size_t data_size;
+
+    int is_subset;                        ///< came from a NAL_SUB_SPS (H.7.3.2.1.3)
+    SPSMVCExt mvc;                        ///< only valid when is_subset is set
 } SPS;
 
 /**
@@ -139,10 +172,24 @@ typedef struct PPS {
     uint32_t(*dequant8_coeff[6])[64];
 
     const SPS   *sps; ///< RefStruct reference
+
+    /**
+     * RefStruct reference to the subset SPS with the same seq_parameter_set_id,
+     * if one exists, else NULL. Slices in a coded slice extension (NAL 20)
+     * activate this instead of ::sps.
+     *
+     * The derived tables above (chroma_qp_table, dequant*_coeff) are built from
+     * ::sps; a subset SPS is required to agree with the base SPS on bit depth
+     * and chroma format for multiview decoding to be attempted, so they are
+     * valid for both.
+     */
+    const SPS   *sps_mvc; ///< RefStruct reference
 } PPS;
 
 typedef struct H264ParamSets {
     const SPS *sps_list[MAX_SPS_COUNT]; ///< RefStruct references
+    /** subset SPSs (NAL 15); a separate id space from sps_list, cf. H.7.4.1.2.1 */
+    const SPS *subset_sps_list[MAX_SPS_COUNT]; ///< RefStruct references
     const PPS *pps_list[MAX_PPS_COUNT]; ///< RefStruct references
 
     /* currently active parameters sets */
@@ -162,6 +209,16 @@ int ff_h264_get_profile(const SPS *sps);
  */
 int ff_h264_decode_seq_parameter_set(GetBitContext *gb, AVCodecContext *avctx,
                                      H264ParamSets *ps, int ignore_truncation);
+
+/**
+ * Decode a subset SPS (NAL_SUB_SPS), cf. H.7.3.2.1.3
+ * subset_seq_parameter_set_rbsp().
+ *
+ * The result is stored in ps->subset_sps_list, which is a separate id space
+ * from ps->sps_list.
+ */
+int ff_h264_decode_subset_seq_parameter_set(GetBitContext *gb, AVCodecContext *avctx,
+                                            H264ParamSets *ps);
 
 /**
  * Decode PPS

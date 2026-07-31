@@ -714,6 +714,11 @@ static int decode_nal_units(H264Context *h, AVBufferRef *buf_ref,
             ff_h264_decode_seq_parameter_set(&nal->gb, avctx, &h->ps, 1);
             break;
         }
+        case H264_NAL_SUB_SPS:
+            /* Failure here only means multiview decoding will not be offered;
+             * the base view is unaffected, so do not propagate the error. */
+            ff_h264_decode_subset_seq_parameter_set(&nal->gb, avctx, &h->ps);
+            break;
         case H264_NAL_PPS:
             if (FF_HW_HAS_CB(avctx, decode_params)) {
                 ret = FF_HW_CALL(avctx, decode_params,

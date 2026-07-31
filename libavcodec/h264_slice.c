@@ -365,8 +365,10 @@ int ff_h264_update_thread_context(AVCodecContext *dst,
     memcpy(h->block_offset, h1->block_offset, sizeof(h->block_offset));
 
     // SPS/PPS
-    for (int i = 0; i < FF_ARRAY_ELEMS(h->ps.sps_list); i++)
+    for (int i = 0; i < FF_ARRAY_ELEMS(h->ps.sps_list); i++) {
         av_refstruct_replace(&h->ps.sps_list[i], h1->ps.sps_list[i]);
+        av_refstruct_replace(&h->ps.subset_sps_list[i], h1->ps.subset_sps_list[i]);
+    }
     for (int i = 0; i < FF_ARRAY_ELEMS(h->ps.pps_list); i++)
         av_refstruct_replace(&h->ps.pps_list[i], h1->ps.pps_list[i]);
 

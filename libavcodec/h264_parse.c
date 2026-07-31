@@ -396,6 +396,10 @@ static int decode_extradata_ps(const uint8_t *data, int size, H264ParamSets *ps,
                 goto fail;
             break;
         }
+        case H264_NAL_SUB_SPS:
+            /* Only affects multiview decoding, so a failure is not fatal. */
+            ff_h264_decode_subset_seq_parameter_set(&nal->gb, logctx, ps);
+            break;
         case H264_NAL_PPS:
             ret = ff_h264_decode_picture_parameter_set(&nal->gb, logctx, ps,
                                                        nal->size_bits);

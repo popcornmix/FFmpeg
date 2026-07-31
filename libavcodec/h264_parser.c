@@ -344,6 +344,9 @@ static inline int parse_nal_units(AVCodecParserContext *s,
         case H264_NAL_SPS:
             ff_h264_decode_seq_parameter_set(&nal.gb, avctx, &p->ps, 0);
             break;
+        case H264_NAL_SUB_SPS:
+            ff_h264_decode_subset_seq_parameter_set(&nal.gb, avctx, &p->ps);
+            break;
         case H264_NAL_PPS:
             ff_h264_decode_picture_parameter_set(&nal.gb, avctx, &p->ps,
                                                  nal.size_bits);
