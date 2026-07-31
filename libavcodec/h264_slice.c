@@ -1350,6 +1350,22 @@ static int h264_init_ps(H264Context *h, const H264SliceContext *sl, int first_sl
             ret = export_multiview(h, mvc_sps);
             if (ret < 0)
                 return ret;
+
+            /* Give the caller a chance to select views now that they are known,
+             * by going through get_format() again. Deliberately not a context
+             * reinit: that would flush the DPB and change base view output. The
+             * format itself cannot change here, only the exported view list. */
+            if (h->context_initialized && mvc_sps) {
+                ret = get_pixel_format(h, 1);
+                if (ret < 0)
+                    return ret;
+                if (ret != h->avctx->pix_fmt) {
+                    av_log(h->avctx, AV_LOG_ERROR,
+                           "Pixel format changed while exporting the view list\n");
+                    return AVERROR(ENOSYS);
+                }
+            }
+
             ret = setup_multiview(h, mvc_sps);
             if (ret < 0)
                 return ret;

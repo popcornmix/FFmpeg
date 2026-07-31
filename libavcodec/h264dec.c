@@ -666,6 +666,20 @@ static int decode_nal_units(H264Context *h, AVBufferRef *buf_ref,
         return ret;
     }
 
+    /* An encoder is free to put the subset SPS between the base view slices and
+     * the dependent view slices of the access unit it belongs to, and the ones in
+     * mp4 and Matroska do exactly that. Picking it up in NAL order would leave
+     * the views unknown while the first access unit is decoded, and its dependent
+     * slices would be dropped below. Parse them all up front instead: subset SPSs
+     * have their own id space (ps.subset_sps_list) and cannot affect the base
+     * view, so hoisting them changes nothing else. */
+    for (i = 0; i < h->pkt.nb_nals; i++)
+        if (h->pkt.nals[i].type == H264_NAL_SUB_SPS) {
+            /* on a copy: the NAL is parsed again in NAL order below */
+            GetBitContext tmp_gb = h->pkt.nals[i].gb;
+            ff_h264_decode_subset_seq_parameter_set(&tmp_gb, avctx, &h->ps);
+        }
+
     if (avctx->active_thread_type & FF_THREAD_FRAME)
         nals_needed = get_last_needed_nal(h);
     if (nals_needed < 0)
