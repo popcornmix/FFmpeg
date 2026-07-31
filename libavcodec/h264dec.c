@@ -555,6 +555,22 @@ static int get_last_needed_nal(H264Context *h)
         case H264_NAL_PPS:
             nals_needed = i;
             break;
+        case H264_NAL_EXTEN_SLICE:
+            if (h->views_active_decode == 1)
+                break;
+            /* the MVC NAL unit header has already been consumed by the NAL parser,
+             * so the slice header starts three bytes further in */
+            ret = init_get_bits8(&gb, nal->data + 4, nal->size - 4);
+            if (ret < 0) {
+                if (h->avctx->err_recognition & AV_EF_EXPLODE)
+                    return ret;
+                break;
+            }
+            if (!get_ue_golomb_long(&gb) || !first_slice ||
+                first_slice != nal->type)
+                nals_needed = i;
+            first_slice = nal->type;
+            break;
         case H264_NAL_DPA:
         case H264_NAL_IDR_SLICE:
         case H264_NAL_SLICE:
@@ -683,6 +699,12 @@ static int decode_nal_units(H264Context *h, AVBufferRef *buf_ref,
             h->has_recovery_point = 1;
             av_fallthrough;
         case H264_NAL_SLICE:
+        case H264_NAL_EXTEN_SLICE:
+            /* A coded slice extension carries a dependent view. Skip it unless we
+             * were asked to decode more than the base view. */
+            if (nal->type == H264_NAL_EXTEN_SLICE && h->views_active_decode == 1)
+                break;
+
             h->has_slice = 1;
 
             if ((err = ff_h264_queue_decode_slice(h, nal))) {

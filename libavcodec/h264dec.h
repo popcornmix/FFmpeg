@@ -171,6 +171,11 @@ typedef struct H264Ref {
     int reference;
     int poc;
     int pic_id;
+    /**
+     * Set for an inter-view reference (MVC). Such a reference behaves as a long
+     * term one for temporal direct prediction, cf. H.8.2.1.
+     */
+    int inter_view;
 
     const H264Picture *parent;
 } H264Ref;
@@ -244,12 +249,21 @@ typedef struct H264SliceContext {
 
     int redundant_pic_count;
 
+    /** anchor_pic_flag of the MVC NAL unit header, 0 for a base view slice */
+    int anchor_pic_flag;
+
     /**
      * number of neighbors (top and/or left) that used 8x8 dct
      */
     int neighbor_transform_size;
 
     int direct_spatial_mv_pred;
+    /**
+     * Whether the colocated picture, ref_list[1][0], is a long term or inter-view
+     * reference, in which case its motion vectors are not used by temporal direct
+     * prediction. Derived once per slice by ff_h264_direct_ref_list_init().
+     */
+    int col_long_ref;
     int col_parity;
     int col_fieldoff;
 
@@ -663,6 +677,19 @@ int ff_h264_alloc_tables(H264Context *h);
 
 int ff_h264_decode_ref_pic_list_reordering(H264SliceContext *sl, void *logctx);
 int ff_h264_build_ref_list(H264Context *h, H264SliceContext *sl);
+/**
+ * Whether a VCL NAL unit starts an IDR picture.
+ *
+ * In a coded slice extension this is signalled by non_idr_flag in the MVC NAL
+ * unit header rather than by the NAL unit type, cf. H.7.4.1.1.
+ */
+static inline int ff_h264_nal_is_idr(const H2645NAL *nal)
+{
+    if (nal->type == H264_NAL_EXTEN_SLICE)
+        return !nal->non_idr_flag;
+    return nal->type == H264_NAL_IDR_SLICE;
+}
+
 void ff_h264_remove_all_refs(H264Context *h);
 
 /**
@@ -674,6 +701,14 @@ void ff_h264_remove_all_refs(H264Context *h);
  * already current is a no-op.
  */
 void ff_h264_view_switch(H264Context *h, unsigned view);
+
+/**
+ * Map a view_id onto its view order index (VOIdx), i.e. its position in the
+ * view_id[] list of the active subset SPS, cf. H.7.4.1.1.
+ *
+ * @return the VOIdx, or a negative value if the stream declares no such view.
+ */
+int ff_h264_view_idx(const H264Context *h, int view_id);
 
 /**
  * Reset all per-view state, as at an IDR or a flush.

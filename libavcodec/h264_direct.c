@@ -44,7 +44,8 @@ static int get_scale_factor(const H264SliceContext *sl,
     if (pocdiff != (int)pocdiff)
         avpriv_request_sample(sl->h264->avctx, "pocdiff overflow");
 
-    if (td == 0 || sl->ref_list[0][i].parent->long_ref) {
+    if (td == 0 || sl->ref_list[0][i].parent->long_ref ||
+        sl->ref_list[0][i].inter_view) {
         return 256;
     } else {
         int64_t pocdiff0 = poc - (int64_t)poc0;
@@ -124,6 +125,12 @@ void ff_h264_direct_ref_list_init(const H264Context *const h, H264SliceContext *
     int list, field;
     int sidx     = (h->picture_structure & 1) ^ 1;
     int ref1sidx = (ref1->reference      & 1) ^ 1;
+
+    /* Hoisted out of the per-macroblock code below. An inter-view reference is
+     * treated as a long term one for temporal direct prediction, cf. H.8.2.1, so
+     * the colocated motion vectors of such a picture are not used. */
+    sl->col_long_ref = ref1->parent ? ref1->parent->long_ref || ref1->inter_view
+                                    : 0;
 
     /* Updates to cur_pic are not safe once ff_thread_finish_setup() has been
      * called (other threads may already be reading these fields). */
@@ -375,7 +382,7 @@ single_col:
                            (uint8_t)ref[0], 1);
             fill_rectangle(&sl->ref_cache[1][scan8[i8 * 4]], 2, 2, 8,
                            (uint8_t)ref[1], 1);
-            if (!IS_INTRA(mb_type_col[y8]) && !sl->ref_list[1][0].parent->long_ref &&
+            if (!IS_INTRA(mb_type_col[y8]) && !sl->col_long_ref &&
                 ((l1ref0[xy8] == 0 &&
                   FFABS(l1mv0[xy4][0]) <= 1 &&
                   FFABS(l1mv0[xy4][1]) <= 1) ||
@@ -406,7 +413,7 @@ single_col:
 
         fill_rectangle(&sl->ref_cache[0][scan8[0]], 4, 4, 8, (uint8_t)ref[0], 1);
         fill_rectangle(&sl->ref_cache[1][scan8[0]], 4, 4, 8, (uint8_t)ref[1], 1);
-        if (!IS_INTRA(mb_type_col[0]) && !sl->ref_list[1][0].parent->long_ref &&
+        if (!IS_INTRA(mb_type_col[0]) && !sl->col_long_ref &&
             ((l1ref0[0] == 0 &&
               FFABS(l1mv0[0][0]) <= 1 &&
               FFABS(l1mv0[0][1]) <= 1) ||
@@ -444,7 +451,7 @@ single_col:
 
             assert(b8_stride == 2);
             /* col_zero_flag */
-            if (!IS_INTRA(mb_type_col[0]) && !sl->ref_list[1][0].parent->long_ref &&
+            if (!IS_INTRA(mb_type_col[0]) && !sl->col_long_ref &&
                 (l1ref0[i8] == 0 ||
                  (l1ref0[i8] < 0 &&
                   l1ref1[i8] == 0 &&
