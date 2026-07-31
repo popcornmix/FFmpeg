@@ -470,6 +470,23 @@ int ff_h264_update_thread_context(AVCodecContext *dst,
     copy_picture_range(h->delayed_pic, h1->delayed_pic,
                        FF_ARRAY_ELEMS(h->delayed_pic), h, h1);
 
+    /* The saved state of the views that are not current holds DPB pointers too,
+     * so it needs the same rebasing. */
+    h->cur_view = h1->cur_view;
+    for (int i = 0; i < FF_ARRAY_ELEMS(h->views); i++) {
+        H264ViewContext       *v  = &h->views[i];
+        const H264ViewContext *v1 = &h1->views[i];
+
+        v->poc             = v1->poc;
+        v->short_ref_count = v1->short_ref_count;
+        v->long_ref_count  = v1->long_ref_count;
+        copy_picture_range(v->short_ref, v1->short_ref,
+                           FF_ARRAY_ELEMS(v->short_ref), h, h1);
+        copy_picture_range(v->long_ref, v1->long_ref,
+                           FF_ARRAY_ELEMS(v->long_ref), h, h1);
+        v->cur_pic_ptr = REBASE_PICTURE(v1->cur_pic_ptr, h, h1);
+    }
+
     h->frame_recovered       = h1->frame_recovered;
 
     ret = ff_h2645_sei_ctx_replace(&h->sei.common, &h1->sei.common);
