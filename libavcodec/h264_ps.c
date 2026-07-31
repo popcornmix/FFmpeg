@@ -340,8 +340,8 @@ int ff_h264_decode_seq_parameter_set(GetBitContext *gb, AVCodecContext *avctx,
         sps->profile_idc ==  44 ||  // Cavlc444 profile
         sps->profile_idc ==  83 ||  // Scalable Constrained High profile (SVC)
         sps->profile_idc ==  86 ||  // Scalable High Intra profile (SVC)
-        sps->profile_idc == 118 ||  // Stereo High profile (MVC)
-        sps->profile_idc == 128 ||  // Multiview High profile (MVC)
+        sps->profile_idc == 118 ||  // Multiview High profile (MVC)
+        sps->profile_idc == 128 ||  // Stereo High profile (MVC)
         sps->profile_idc == 138 ||  // Multiview Depth High profile (MVCD)
         sps->profile_idc == 144) {  // old High444 profile
         sps->chroma_format_idc = get_ue_golomb_31(gb);
