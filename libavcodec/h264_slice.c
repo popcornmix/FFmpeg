@@ -373,6 +373,7 @@ int ff_h264_update_thread_context(AVCodecContext *dst,
         av_refstruct_replace(&h->ps.subset_sps_list[i], h1->ps.subset_sps_list[i]);
     }
     h->ps.latest_mvc_sps_id  = h1->ps.latest_mvc_sps_id;
+    h->ps.used_mvc_sps_id    = h1->ps.used_mvc_sps_id;
     h->ps.subset_sps_ignored = h1->ps.subset_sps_ignored;
     for (int i = 0; i < FF_ARRAY_ELEMS(h->ps.pps_list); i++)
         av_refstruct_replace(&h->ps.pps_list[i], h1->ps.pps_list[i]);
@@ -773,7 +774,11 @@ static void implicit_weight_table(const H264Context *h, H264SliceContext *sl, in
         int64_t poc0 = sl->ref_list[0][ref0].poc;
         for (ref1 = ref_start; ref1 < ref_count1; ref1++) {
             int w = 32;
-            if (!sl->ref_list[0][ref0].parent->long_ref && !sl->ref_list[1][ref1].parent->long_ref) {
+            /* An inter-view reference is neither a short nor a long term
+             * reference (G.8.4), however the picture of the other view it is
+             * taken from is marked. */
+            if ((!sl->ref_list[0][ref0].parent->long_ref || sl->ref_list[0][ref0].inter_view) &&
+                (!sl->ref_list[1][ref1].parent->long_ref || sl->ref_list[1][ref1].inter_view)) {
                 int poc1 = sl->ref_list[1][ref1].poc;
                 int td   = av_clip_int8(poc1 - poc0);
                 if (td) {
@@ -848,8 +853,13 @@ static const SPS *find_mvc_sps(void *logctx, const H264ParamSets *ps)
     int ambiguous = 0;
 
     /* The base view's PPS names an ordinary SPS, and a subset SPS with the same
-     * id need not be the one in use, cf. G.7.4.1.2.1. Take the one received
-     * last, and a scan should that have been replaced by one without views. */
+     * id need not be the one in use, cf. G.7.4.1.2.1. Take the one the coded
+     * slice extensions refer to, failing that the one received last, and a scan
+     * should that have been replaced by one without views. */
+    found = ff_h264_used_mvc_sps(ps);
+    if (found)
+        return found;
+
     found = ff_h264_latest_mvc_sps(ps);
     if (found)
         return found;
@@ -964,6 +974,21 @@ static int setup_multiview(H264Context *h, const SPS *mvc_sps)
     if (views_active_output != 1 && h->avctx->hwaccel) {
         av_log(h->avctx, AV_LOG_WARNING,
                "Multiview decoding is not supported with hardware acceleration; "
+               "decoding the base view only.\n");
+        return 0;
+    }
+
+    /* Not supported yet: the views of a frame thread and the slice queue are
+     * not kept apart, nor is the field pair state of each view. */
+    if (views_active_output != 1 && h->avctx->active_thread_type) {
+        av_log(h->avctx, AV_LOG_WARNING,
+               "Multiview decoding is not supported with threading; "
+               "decoding the base view only.\n");
+        return 0;
+    }
+    if (views_active_output != 1 && !mvc_sps->frame_mbs_only_flag) {
+        av_log(h->avctx, AV_LOG_WARNING,
+               "Field coded multiview decoding is not supported; "
                "decoding the base view only.\n");
         return 0;
     }
@@ -1271,6 +1296,30 @@ static int h264_init_ps(H264Context *h, const H264SliceContext *sl, int first_sl
 
     if (first_slice)
         av_refstruct_replace(&h->ps.pps, h->ps.pps_list[sl->pps_id]);
+
+    if (h->cur_view) {
+        /* A dependent view activates the subset SPS with this id. It has to agree
+         * with the base view on everything the decoding context is sized and
+         * configured from -- reinitialising per view is not supported -- so
+         * validate that and then skip the whole reinit path below. */
+        const SPS *mvc_sps = ff_h264_pps_sps_mvc(&h->ps, h->ps.pps);
+
+        if (!mvc_sps)
+            mvc_sps = h->ps.pps->sps;
+
+        if (mvc_sps->mb_width          != h->mb_width             ||
+            mvc_sps->mb_height         != h->mb_height            ||
+            mvc_sps->bit_depth_luma    != h->cur_bit_depth_luma   ||
+            mvc_sps->chroma_format_idc != h->cur_chroma_format_idc) {
+            av_log(h->avctx, AV_LOG_ERROR,
+                   "Base and dependent view SPS have an unsupported parameter "
+                   "combination\n");
+            return AVERROR(ENOSYS);
+        }
+
+        h->ps.sps = mvc_sps;
+        return 0;
+    }
 
     if (h->ps.sps != h->ps.pps->sps) {
         h->ps.sps = h->ps.pps->sps;
@@ -1648,7 +1697,7 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
     h->poc.delta_poc[0]     = sl->delta_poc[0];
     h->poc.delta_poc[1]     = sl->delta_poc[1];
 
-    if (nal->type == H264_NAL_IDR_SLICE)
+    if (ff_h264_nal_is_idr(nal))
         h->poc_offset = sl->idr_pic_id;
     else if (h->picture_intra_only)
         h->poc_offset = 0;
@@ -1678,7 +1727,7 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
      * decode the IDR into the picture of a field that is about to be marked
      * unused. Both fields coded as IDR is not conforming either, but is seen in
      * the wild and keeps being paired. */
-    idr_unpaired = h->first_field && nal->type == H264_NAL_IDR_SLICE &&
+    idr_unpaired = h->first_field && ff_h264_nal_is_idr(nal) &&
                    !(h->cur_pic_ptr->f->flags & AV_FRAME_FLAG_KEY);
 
     /* See if we have a decoded first field looking for a pair...
@@ -1907,7 +1956,7 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
     h->nb_mmco = sl->nb_mmco;
     h->explicit_ref_marking = sl->explicit_ref_marking;
 
-    h->picture_idr = nal->type == H264_NAL_IDR_SLICE;
+    h->picture_idr = ff_h264_nal_is_idr(nal);
 
     if (h->sei.recovery_point.recovery_frame_cnt >= 0) {
         const int sei_recovery_frame_cnt = h->sei.recovery_point.recovery_frame_cnt;
@@ -1924,9 +1973,11 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
         }
     }
 
-    h->cur_pic_ptr->f->flags |= AV_FRAME_FLAG_KEY * !!(nal->type == H264_NAL_IDR_SLICE);
+    h->views[h->cur_view].cur_pic_ptr = h->cur_pic_ptr;
 
-    if (nal->type == H264_NAL_IDR_SLICE) {
+    h->cur_pic_ptr->f->flags |= AV_FRAME_FLAG_KEY * !!(ff_h264_nal_is_idr(nal));
+
+    if (ff_h264_nal_is_idr(nal)) {
         h->cur_pic_ptr->recovered |= FRAME_RECOVERED_IDR;
         // If we have an IDR, all frames after it in decoded order are
         // "recovered".
@@ -1961,14 +2012,15 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
 }
 
 static int h264_slice_header_parse(const H264Context *h, H264SliceContext *sl,
-                                   const H2645NAL *nal)
+                                   const H2645NAL *nal, unsigned view)
 {
     const SPS *sps;
     const PPS *pps;
     int ret;
     unsigned int slice_type, tmp, i;
     int field_pic_flag, bottom_field_flag;
-    int first_slice = sl == h->slice_ctx && !h->current_slice;
+    int first_slice = sl == h->slice_ctx &&
+                      (!h->current_slice || view != h->cur_view);
     int picture_structure;
 
     if (first_slice)
@@ -1993,7 +2045,7 @@ static int h264_slice_header_parse(const H264Context *h, H264SliceContext *sl,
     sl->slice_type     = slice_type;
     sl->slice_type_nos = slice_type & 3;
 
-    if (nal->type  == H264_NAL_IDR_SLICE &&
+    if (nal->type == H264_NAL_IDR_SLICE &&
         sl->slice_type_nos != AV_PICTURE_TYPE_I) {
         av_log(h->avctx, AV_LOG_ERROR, "A non-intra slice in an IDR NAL unit.\n");
         return AVERROR_INVALIDDATA;
@@ -2011,7 +2063,46 @@ static int h264_slice_header_parse(const H264Context *h, H264SliceContext *sl,
         return AVERROR_INVALIDDATA;
     }
     pps = h->ps.pps_list[sl->pps_id];
+    /* A coded slice extension activates the subset SPS with this id, an ordinary
+     * slice the plain SPS, cf. G.7.4.1.2.1. */
     sps = pps->sps;
+    if (nal->type == H264_NAL_EXTEN_SLICE) {
+        const SPS *mvc_sps = ff_h264_pps_sps_mvc(&h->ps, pps);
+
+        if (mvc_sps)
+            sps = mvc_sps;
+    }
+    if (nal->type == H264_NAL_EXTEN_SLICE && !sps->is_subset) {
+        av_log(h->avctx, AV_LOG_ERROR,
+               "PPS %u of a coded slice extension does not refer to a subset SPS\n",
+               sl->pps_id);
+        return AVERROR_INVALIDDATA;
+    }
+
+    /* The scaling matrices and the tables derived from them come from the SPS
+     * the PPS was parsed against, which for a PPS shared between an ordinary
+     * and a subset SPS is the ordinary one. Separate tables per view are not
+     * supported, so refuse a subset SPS that would need them. The same goes for
+     * a PPS whose ordinary SPS made the parser skip its trailing fields, which
+     * the subset SPS does not. This is checked here rather than when parsing the
+     * PPS, as the subset SPS may arrive or be replaced afterwards. */
+    if (nal->type == H264_NAL_EXTEN_SLICE && sps != pps->sps &&
+        (pps->extension_ignored                                ||
+         sps->bit_depth_luma    != pps->sps->bit_depth_luma    ||
+         sps->bit_depth_chroma  != pps->sps->bit_depth_chroma  ||
+         sps->chroma_format_idc != pps->sps->chroma_format_idc ||
+         sps->transform_bypass  != pps->sps->transform_bypass  ||
+         memcmp(sps->scaling_matrix4, pps->sps->scaling_matrix4,
+                sizeof(sps->scaling_matrix4)) ||
+         memcmp(sps->scaling_matrix8, pps->sps->scaling_matrix8,
+                sizeof(sps->scaling_matrix8)))) {
+        avpriv_report_missing_feature(h->avctx,
+            "PPS %u derived from an SPS incompatible with its subset SPS",
+            sl->pps_id);
+        return AVERROR_PATCHWELCOME;
+    }
+
+    sl->anchor_pic_flag = nal->anchor_pic_flag;
 
     sl->frame_num = get_bits(&sl->gb, sps->log2_max_frame_num);
     if (!first_slice) {
@@ -2050,7 +2141,7 @@ static int h264_slice_header_parse(const H264Context *h, H264SliceContext *sl,
         sl->max_pic_num  = 1 << (sps->log2_max_frame_num + 1);
     }
 
-    if (nal->type == H264_NAL_IDR_SLICE) {
+    if (ff_h264_nal_is_idr(nal)) {
         unsigned idr_pic_id = get_ue_golomb_long(&sl->gb);
         if (idr_pic_id < 65536) {
             sl->idr_pic_id = idr_pic_id;
@@ -2184,7 +2275,7 @@ static int h264_slice_init(H264Context *h, H264SliceContext *sl,
 {
     int i, j, ret = 0;
 
-    if (h->picture_idr && nal->type != H264_NAL_IDR_SLICE) {
+    if (h->picture_idr && !ff_h264_nal_is_idr(nal)) {
         av_log(h->avctx, AV_LOG_ERROR, "Invalid mix of IDR and non-IDR slices\n");
         return AVERROR_INVALIDDATA;
     }
@@ -2221,11 +2312,11 @@ static int h264_slice_init(H264Context *h, H264SliceContext *sl,
 
     if (h->avctx->skip_loop_filter >= AVDISCARD_ALL ||
         (h->avctx->skip_loop_filter >= AVDISCARD_NONKEY &&
-         h->nal_unit_type != H264_NAL_IDR_SLICE) ||
+         !ff_h264_nal_is_idr(nal)) ||
         (h->avctx->skip_loop_filter >= AVDISCARD_NONINTRA &&
-         sl->slice_type_nos != AV_PICTURE_TYPE_I) ||
+         sl->slice_type_nos != AV_PICTURE_TYPE_I && !ff_h264_nal_is_idr(nal)) ||
         (h->avctx->skip_loop_filter >= AVDISCARD_BIDIR  &&
-         sl->slice_type_nos == AV_PICTURE_TYPE_B) ||
+         sl->slice_type_nos == AV_PICTURE_TYPE_B && !ff_h264_nal_is_idr(nal)) ||
         (h->avctx->skip_loop_filter >= AVDISCARD_NONREF &&
          nal->ref_idc == 0))
         sl->deblocking_filter = 0;
@@ -2317,7 +2408,7 @@ static int h264_slice_init(H264Context *h, H264SliceContext *sl,
                sl->mb_y * h->mb_width + sl->mb_x,
                av_get_picture_type_char(sl->slice_type),
                sl->slice_type_fixed ? " fix" : "",
-               nal->type == H264_NAL_IDR_SLICE ? " IDR" : "",
+               ff_h264_nal_is_idr(nal) ? " IDR" : "",
                h->poc.frame_num,
                h->cur_pic_ptr->field_poc[0],
                h->cur_pic_ptr->field_poc[1],
@@ -2400,21 +2491,81 @@ int ff_h264_attach_slice_partition(const H264Context *h, H264SliceContext *sl,
     return 0;
 }
 
+int ff_h264_exten_slice_sps_id(const H264ParamSets *ps, const H2645NAL *slice,
+                               const H2645NAL *nals, int nb_nals)
+{
+    GetBitContext gb = slice->gb;
+    unsigned pps_id, sps_id = MAX_SPS_COUNT;
+
+    get_ue_golomb_long(&gb); /* first_mb_in_slice */
+    get_ue_golomb_31(&gb);   /* slice_type */
+    pps_id = get_ue_golomb(&gb);
+    if (pps_id >= MAX_PPS_COUNT)
+        return -1;
+
+    /* the last PPS with this id among nals is the one the slice refers to */
+    for (int i = nb_nals - 1; i >= 0; i--) {
+        if (nals[i].type == H264_NAL_PPS) {
+            GetBitContext pps_gb = nals[i].gb;
+
+            if (get_ue_golomb(&pps_gb) == pps_id) {
+                sps_id = get_ue_golomb_31(&pps_gb);
+                break;
+            }
+        }
+    }
+    if (sps_id == MAX_SPS_COUNT && ps->pps_list[pps_id])
+        sps_id = ps->pps_list[pps_id]->sps_id;
+
+    return sps_id < MAX_SPS_COUNT && ps->subset_sps_list[sps_id] ? sps_id : -1;
+}
+
 int ff_h264_queue_decode_slice(H264Context *h, const H2645NAL *nal,
                                H264SliceContext **queued)
 {
     H264SliceContext *sl = h->slice_ctx + h->nb_slice_ctx_queued;
-    int first_slice = sl == h->slice_ctx && !h->current_slice;
+    int first_slice;
+    unsigned view;
     int ret;
 
     *queued = NULL;
-    sl->gb  = nal->gb;
+
+    /* Which view does this slice belong to? A slice that is not a coded slice
+     * extension is always the base view, cf. G.7.4.1.1. */
+    if (nal->type == H264_NAL_EXTEN_SLICE) {
+        /* The active PPS is still the base view's, so resolve the slice's own;
+         * the parameter sets preceding it have been parsed by now. */
+        int sps_id = ff_h264_exten_slice_sps_id(&h->ps, nal, NULL, 0);
+        const SPS *mvc_sps = sps_id >= 0 ? h->ps.subset_sps_list[sps_id] : NULL;
+        int voidx;
+
+        if (mvc_sps && mvc_sps->mvc.num_views > 1)
+            h->ps.used_mvc_sps_id = sps_id;
+        voidx = ff_h264_view_idx(h, mvc_sps, nal->view_id);
+
+        /* Without an initialised context, e.g. after a flush, the base view has
+         * not yet allocated the tables this view decodes into. */
+        if (voidx <= 0 || !(h->views_active_decode & (1 << voidx)) ||
+            !h->context_initialized) {
+            /* not a view we know about or were asked to decode */
+            sl->ref_count[0] = sl->ref_count[1] = 0;
+            h->skipped_view_slices = 1;
+            return 0;
+        }
+        view = voidx;
+    } else
+        view = 0;
+
+    first_slice = sl == h->slice_ctx &&
+                  (!h->current_slice || view != h->cur_view);
+
+    sl->gb = nal->gb;
 
     sl->data_partitioning = 0;
     sl->dpb_available     = 0;
     sl->dpc_available     = 0;
 
-    ret = h264_slice_header_parse(h, sl, nal);
+    ret = h264_slice_header_parse(h, sl, nal, view);
     if (ret < 0)
         return ret;
 
@@ -2430,7 +2581,7 @@ int ff_h264_queue_decode_slice(H264Context *h, const H2645NAL *nal,
         return 0;
     }
 
-    if (sl->first_mb_addr == 0 || !h->current_slice) {
+    if ((sl->first_mb_addr == 0 || !h->current_slice) && view == h->cur_view) {
         if (h->setup_finished) {
             av_log(h->avctx, AV_LOG_ERROR, "Too many fields\n");
             return AVERROR_INVALIDDATA;
@@ -2454,7 +2605,19 @@ int ff_h264_queue_decode_slice(H264Context *h, const H2645NAL *nal,
                 sl = h->slice_ctx;
             }
 
-            if (h->cur_pic_ptr && FIELD_PICTURE(h) && h->first_field) {
+            if (view != h->cur_view) {
+                /* A new view of the same access unit: finish off the picture of
+                 * the view we were decoding and start a fresh one. */
+                if (h->cur_pic_ptr) {
+                    ret = ff_h264_field_end(h, h->slice_ctx, 1);
+                    if (ret < 0)
+                        return ret;
+                    h->cur_pic_ptr = NULL;
+                }
+                h->current_slice = 0;
+                h->first_field   = 0;
+                ff_h264_view_switch(h, view);
+            } else if (h->cur_pic_ptr && FIELD_PICTURE(h) && h->first_field) {
                 ret = ff_h264_field_end(h, h->slice_ctx, 1);
                 if (ret < 0)
                     return ret;
@@ -2482,12 +2645,25 @@ int ff_h264_queue_decode_slice(H264Context *h, const H2645NAL *nal,
     if (!h->current_slice)
         av_assert0(sl == h->slice_ctx);
 
+    /* Returning to the base view for a new access unit, or starting a view whose
+     * predecessor produced no picture. */
+    if (!h->current_slice)
+        ff_h264_view_switch(h, view);
+
+    if (h->idr_pending) {
+        ff_h264_idr(h);
+        h->idr_pending = 0;
+    }
+
     if (h->current_slice == 0 && !h->first_field) {
         if (
             (h->avctx->skip_frame >= AVDISCARD_NONREF && !h->nal_ref_idc) ||
-            (h->avctx->skip_frame >= AVDISCARD_BIDIR  && sl->slice_type_nos == AV_PICTURE_TYPE_B) ||
-            (h->avctx->skip_frame >= AVDISCARD_NONINTRA && sl->slice_type_nos != AV_PICTURE_TYPE_I) ||
-            (h->avctx->skip_frame >= AVDISCARD_NONKEY && h->nal_unit_type != H264_NAL_IDR_SLICE && h->sei.recovery_point.recovery_frame_cnt < 0) ||
+            /* An IDR view component of a non-base view may consist of P or B
+             * slices, predicted from the other views only; it is still a key
+             * picture. */
+            (h->avctx->skip_frame >= AVDISCARD_BIDIR  && sl->slice_type_nos == AV_PICTURE_TYPE_B && !ff_h264_nal_is_idr(nal)) ||
+            (h->avctx->skip_frame >= AVDISCARD_NONINTRA && sl->slice_type_nos != AV_PICTURE_TYPE_I && !ff_h264_nal_is_idr(nal)) ||
+            (h->avctx->skip_frame >= AVDISCARD_NONKEY && !ff_h264_nal_is_idr(nal) && h->sei.recovery_point.recovery_frame_cnt < 0) ||
             h->avctx->skip_frame >= AVDISCARD_ALL) {
             return 0;
         }
@@ -2502,7 +2678,7 @@ int ff_h264_queue_decode_slice(H264Context *h, const H2645NAL *nal,
             av_log(h->avctx, AV_LOG_ERROR, "PPS changed between slices\n");
             return AVERROR_INVALIDDATA;
         }
-        if (h->ps.sps != pps->sps) {
+        if (h->ps.sps != pps->sps && !h->cur_view) {
             av_log(h->avctx, AV_LOG_ERROR,
                "SPS changed in the middle of the frame\n");
             return AVERROR_INVALIDDATA;

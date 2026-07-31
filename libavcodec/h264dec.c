@@ -306,6 +306,7 @@ static int h264_init_context(AVCodecContext *avctx, H264Context *h)
     h->recovery_frame        = -1;
     h->frame_recovered       = 0;
     h->poc.prev_frame_num    = -1;
+    h->ps.used_mvc_sps_id    = -1;
     h->sei.common.frame_packing.arrangement_cancel_flag = -1;
     h->sei.common.unregistered.x264_build = -1;
 
@@ -455,7 +456,7 @@ static av_cold int h264_decode_init(AVCodecContext *avctx)
 /**
  * instantaneous decoder refresh.
  */
-static void idr(H264Context *h)
+void ff_h264_idr(H264Context *h)
 {
     const unsigned prev_view = h->cur_view;
 
@@ -497,7 +498,7 @@ void ff_h264_flush_change(H264Context *h)
 
     h->next_outputed_poc = INT_MIN;
     h->prev_interlaced_frame = 1;
-    idr(h);
+    ff_h264_idr(h);
 
     h->poc.prev_frame_num = -1;
     if (h->cur_pic_ptr) {
@@ -566,6 +567,22 @@ static int get_last_needed_nal(H264Context *h)
         case H264_NAL_SPS:
         case H264_NAL_PPS:
             nals_needed = i;
+            break;
+        case H264_NAL_EXTEN_SLICE:
+            if (h->views_active_decode == 1)
+                break;
+            /* the MVC NAL unit header has already been consumed by the NAL parser,
+             * so the slice header starts three bytes further in */
+            ret = init_get_bits8(&gb, nal->data + 4, nal->size - 4);
+            if (ret < 0) {
+                if (h->avctx->err_recognition & AV_EF_EXPLODE)
+                    return ret;
+                break;
+            }
+            if (!get_ue_golomb_long(&gb) || !first_slice ||
+                first_slice != nal->type)
+                nals_needed = i;
+            first_slice = nal->type;
             break;
         case H264_NAL_DPA:
         case H264_NAL_IDR_SLICE:
@@ -693,6 +710,8 @@ static int decode_nal_units(H264Context *h, AVBufferRef *buf_ref,
     int i, ret = 0;
 
     h->has_slice = 0;
+    h->skipped_view_slices = 0;
+    h->idr_pending = 0;
     h->nal_unit_type= 0;
 
     if (!(avctx->flags2 & AV_CODEC_FLAG2_CHUNKS)) {
@@ -745,14 +764,23 @@ static int decode_nal_units(H264Context *h, AVBufferRef *buf_ref,
                 ret = -1;
                 goto end;
             }
+            /* Deferred to ff_h264_queue_decode_slice(), see ::idr_pending. */
             if(!idr_cleared) {
-                idr(h); // FIXME ensure we don't lose some frames if there is reordering
+                h->idr_pending = 1; // FIXME ensure we don't lose some frames if there is reordering
             }
             idr_cleared = 1;
             h->has_recovery_point = 1;
             av_fallthrough;
         case H264_NAL_SLICE:
         case H264_NAL_DPA:
+        case H264_NAL_EXTEN_SLICE:
+            /* A coded slice extension carries a dependent view. Skip it unless we
+             * were asked to decode more than the base view. */
+            if (nal->type == H264_NAL_EXTEN_SLICE && h->views_active_decode == 1) {
+                h->skipped_view_slices = 1;
+                break;
+            }
+
             h->has_slice = 1;
 
             if (nal->type == H264_NAL_DPA) {
@@ -775,7 +803,14 @@ static int decode_nal_units(H264Context *h, AVBufferRef *buf_ref,
                 }
             }
 
-            if ((err = ff_h264_queue_decode_slice(h, nal, &queued))) {
+            err = ff_h264_queue_decode_slice(h, nal, &queued);
+            /* A slice that failed or was dropped before it got that far still
+             * starts a new coded video sequence. */
+            if (h->idr_pending) {
+                ff_h264_idr(h);
+                h->idr_pending = 0;
+            }
+            if (err) {
                 H264SliceContext *sl = h->slice_ctx + h->nb_slice_ctx_queued;
                 sl->ref_count[0] = sl->ref_count[1] = 0;
                 break;
@@ -1203,7 +1238,11 @@ static int h264_decode_packet(AVCodecContext *avctx, AVPacket *avpkt)
     }
 
     if (!(avctx->flags2 & AV_CODEC_FLAG2_CHUNKS) && (!h->cur_pic_ptr || !h->has_slice)) {
+        /* A packet holding only the slices of views that are not being decoded
+         * is not an error: the views of an access unit may arrive in separate
+         * packets, and the caller need not have asked for all of them. */
         if (avctx->skip_frame >= AVDISCARD_NONREF ||
+            h->skipped_view_slices ||
             buf_size >= 4 && !memcmp("Q264", buf, 4))
             return 0;
         av_log(avctx, AV_LOG_ERROR, "no frame!\n");

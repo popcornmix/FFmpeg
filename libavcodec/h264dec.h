@@ -172,6 +172,11 @@ typedef struct H264Ref {
     int reference;
     int poc;
     int pic_id;
+    /**
+     * Set for an inter-view reference (MVC). Such a reference is neither a
+     * short nor a long term one, cf. G.8.4.
+     */
+    int inter_view;
 
     const H264Picture *parent;
 } H264Ref;
@@ -254,12 +259,21 @@ typedef struct H264SliceContext {
 
     int redundant_pic_count;
 
+    /** anchor_pic_flag of the MVC NAL unit header, 0 for a base view slice */
+    int anchor_pic_flag;
+
     /**
      * number of neighbors (top and/or left) that used 8x8 dct
      */
     int neighbor_transform_size;
 
     int direct_spatial_mv_pred;
+    /**
+     * Whether the colocated picture, ref_list[1][0], is a long term or inter-view
+     * reference, in which case its motion vectors are not used by temporal direct
+     * prediction. Derived once per slice by ff_h264_direct_ref_list_init().
+     */
+    int col_long_ref;
     int col_parity;
     int col_fieldoff;
 
@@ -616,6 +630,19 @@ typedef struct H264Context {
     unsigned nb_views;
     /** VOIdx of the view currently being decoded. */
     unsigned cur_view;
+    /**
+     * Whether the current packet held a coded slice extension of a view that
+     * is not being decoded. Such a packet may legitimately yield no picture.
+     */
+    int skipped_view_slices;
+    /**
+     * An IDR slice was met in this packet and ff_h264_idr() has yet to run.
+     * It resets every view, so it has to wait until the picture of the view
+     * being left is finished: a packet may start with the dependent view of
+     * the previous access unit, and that picture's reference marking would
+     * otherwise refill the state just cleared.
+     */
+    int idr_pending;
     /** Bitmasks of VOIdx that are decoded / output. Bit 0 (base view) is always set. */
     unsigned views_active_decode;
     unsigned views_active_output;
@@ -673,6 +700,19 @@ int ff_h264_alloc_tables(H264Context *h);
 
 int ff_h264_decode_ref_pic_list_reordering(H264SliceContext *sl, void *logctx);
 int ff_h264_build_ref_list(H264Context *h, H264SliceContext *sl);
+/**
+ * Whether a VCL NAL unit starts an IDR picture.
+ *
+ * In a coded slice extension this is signalled by non_idr_flag in the MVC NAL
+ * unit header rather than by the NAL unit type, cf. G.7.4.1.1.
+ */
+static inline int ff_h264_nal_is_idr(const H2645NAL *nal)
+{
+    if (nal->type == H264_NAL_EXTEN_SLICE)
+        return !nal->non_idr_flag;
+    return nal->type == H264_NAL_IDR_SLICE;
+}
+
 void ff_h264_remove_all_refs(H264Context *h);
 
 /**
@@ -690,6 +730,23 @@ void ff_h264_view_switch(H264Context *h, unsigned view);
  * currently swapped in, without switching away from it.
  */
 void ff_h264_view_sync(H264Context *h);
+
+/**
+ * Map a view_id onto its view order index (VOIdx), i.e. its position in the
+ * view_id[] list of @p sps, cf. G.7.4.1.1. If @p sps is NULL or declares no
+ * views, the subset SPS the view list was taken from is used.
+ *
+ * @return the VOIdx, or a negative value if the stream declares no such view.
+ */
+int ff_h264_view_idx(const H264Context *h, const SPS *sps, int view_id);
+
+/**
+ * The id of the subset SPS that the PPS referred to by a coded slice extension
+ * names, or -1 if there is none. The last PPS among @p nals with the right id
+ * takes precedence over the parsed ones.
+ */
+int ff_h264_exten_slice_sps_id(const H264ParamSets *ps, const H2645NAL *slice,
+                               const H2645NAL *nals, int nb_nals);
 
 /**
  * Reset all per-view state, as at an IDR or a flush.
@@ -808,6 +865,12 @@ int ff_h264_update_thread_context_for_user(AVCodecContext *dst,
                                            const AVCodecContext *src);
 
 void ff_h264_flush_change(H264Context *h);
+
+/**
+ * Instantaneous decoder refresh: empty the reference lists and reset the
+ * picture order and frame_num state of every view.
+ */
+void ff_h264_idr(H264Context *h);
 
 void ff_h264_free_tables(H264Context *h);
 

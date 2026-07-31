@@ -172,6 +172,12 @@ typedef struct PPS {
     uint32_t(*dequant8_coeff[6])[64];
 
     const SPS   *sps; ///< RefStruct reference
+    /**
+     * Set when ::sps made the parser ignore transform_8x8_mode_flag and what
+     * follows it, see more_rbsp_data_in_pps(); they are then missing for any
+     * other SPS this PPS is used with.
+     */
+    int extension_ignored;
 } PPS;
 
 typedef struct H264ParamSets {
@@ -181,6 +187,9 @@ typedef struct H264ParamSets {
     const PPS *pps_list[MAX_PPS_COUNT]; ///< RefStruct references
     /** id of the subset SPS declaring several views that was received last */
     int latest_mvc_sps_id;
+    /** id of the subset SPS the coded slice extensions of the current access
+     *  unit, or failing that of the last one seen, refer to; -1 if none */
+    int used_mvc_sps_id;
     /** bitmask of the ids of subset SPSs dropped for an unsupported profile */
     uint32_t subset_sps_ignored;
 
@@ -245,6 +254,20 @@ static inline const SPS *ff_h264_pps_sps_mvc(const H264ParamSets *ps,
 static inline const SPS *ff_h264_latest_mvc_sps(const H264ParamSets *ps)
 {
     const SPS *sps = ps->subset_sps_list[ps->latest_mvc_sps_id];
+
+    return sps && sps->mvc.num_views > 1 ? sps : NULL;
+}
+
+/**
+ * The subset SPS declaring several views that the coded slice extensions of the
+ * current access unit refer to, or failing that those of the last one seen.
+ * Unlike ff_h264_pps_sps_mvc() on the active PPS, this is not misled by an
+ * unused subset SPS sharing its id with the ordinary SPS of the base view.
+ */
+static inline const SPS *ff_h264_used_mvc_sps(const H264ParamSets *ps)
+{
+    const SPS *sps = ps->used_mvc_sps_id >= 0 ?
+                     ps->subset_sps_list[ps->used_mvc_sps_id] : NULL;
 
     return sps && sps->mvc.num_views > 1 ? sps : NULL;
 }

@@ -1005,7 +1005,8 @@ int ff_h264_decode_picture_parameter_set(GetBitContext *gb, AVCodecContext *avct
            sizeof(pps->scaling_matrix8));
 
     bits_left = bit_length - get_bits_count(gb);
-    if (bits_left > 0 && more_rbsp_data_in_pps(sps, avctx)) {
+    pps->extension_ignored = bits_left > 0 && !more_rbsp_data_in_pps(sps, avctx);
+    if (bits_left > 0 && !pps->extension_ignored) {
         pps->transform_8x8_mode = get_bits1(gb);
         pps->pic_scaling_matrix_present_flag = get_bits1(gb);
         ret = decode_scaling_matrices(gb, sps, pps, 0,
