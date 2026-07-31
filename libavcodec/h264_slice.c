@@ -1309,6 +1309,44 @@ static enum AVPixelFormat non_j_pixfmt(enum AVPixelFormat a)
     }
 }
 
+/**
+ * Export the views of @p mvc_sps and select among them, if it is not the subset
+ * SPS that was already in use.
+ */
+static int update_mvc_sps(H264Context *h, const SPS *mvc_sps, int data_partitioning)
+{
+    int ret;
+
+    if (mvc_sps == h->mvc_sps)
+        return 0;
+
+    h->mvc_sps = mvc_sps;
+    ret = export_multiview(h, mvc_sps);
+    if (ret < 0)
+        return ret;
+
+    /* Give the caller a chance to select views now that they are known,
+     * by going through get_format() again. Deliberately not a context
+     * reinit: that would flush the DPB and change base view output. The
+     * format itself cannot change here, only the exported view list. */
+    /* Not with a hardware accelerator: multiview is refused there
+     * anyway, so there is nothing to select, and going through
+     * ff_get_format() again would tear down and recreate the hardware
+     * state underneath the frames still referencing it. */
+    if (h->context_initialized && mvc_sps && !h->avctx->hwaccel) {
+        ret = get_pixel_format(h, 1, data_partitioning);
+        if (ret < 0)
+            return ret;
+        if (ret != h->avctx->pix_fmt) {
+            av_log(h->avctx, AV_LOG_ERROR,
+                   "Pixel format changed while exporting the view list\n");
+            return AVERROR(ENOSYS);
+        }
+    }
+
+    return setup_multiview(h, mvc_sps);
+}
+
 static int h264_init_ps(H264Context *h, const H264SliceContext *sl, int first_slice)
 {
     const SPS *sps;
@@ -1420,17 +1458,9 @@ static int h264_init_ps(H264Context *h, const H264SliceContext *sl, int first_sl
      * get_format() callback only sees views that were already known by then;
      * setting view_ids up front always works. */
     if (!h->cur_view && first_slice) {
-        const SPS *mvc_sps = find_mvc_sps(h->avctx, &h->ps);
-
-        if (mvc_sps != h->mvc_sps) {
-            h->mvc_sps = mvc_sps;
-            ret = export_multiview(h, mvc_sps);
-            if (ret < 0)
-                return ret;
-            ret = setup_multiview(h, mvc_sps);
-            if (ret < 0)
-                return ret;
-        }
+        ret = update_mvc_sps(h, find_mvc_sps(h->avctx, &h->ps), sl->data_partitioning);
+        if (ret < 0)
+            return ret;
     }
 
     if (!h->context_initialized || must_reinit || needs_reinit) {
@@ -2599,8 +2629,18 @@ int ff_h264_queue_decode_slice(H264Context *h, const H2645NAL *nal,
         const SPS *mvc_sps = sps_id >= 0 ? h->ps.subset_sps_list[sps_id] : NULL;
         int voidx;
 
-        if (mvc_sps && mvc_sps->mvc.num_views > 1)
+        /* Its parameter sets may have arrived after the base view slices, even
+         * in another packet, and established another set of views; select from
+         * those before deciding whether to decode the slice and before its
+         * picture is tagged with a view_id. */
+        if (mvc_sps && mvc_sps->mvc.num_views > 1) {
             h->ps.used_mvc_sps_id = sps_id;
+            if (h->context_initialized) {
+                ret = update_mvc_sps(h, mvc_sps, 0);
+                if (ret < 0)
+                    return ret;
+            }
+        }
         voidx = ff_h264_view_idx(h, mvc_sps, nal->view_id);
 
         /* Without an initialised context, e.g. after a flush, the base view has
@@ -2613,6 +2653,7 @@ int ff_h264_queue_decode_slice(H264Context *h, const H2645NAL *nal,
             return 0;
         }
         view = voidx;
+        h->has_slice = 1;
     } else
         view = 0;
 

@@ -707,6 +707,7 @@ static int decode_nal_units(H264Context *h, AVBufferRef *buf_ref,
     int nals_needed = 0; ///< number of NALs that need decoding before the next frame thread starts
     int idr_cleared=0;
     int dp_attached_to = -1; ///< index of the last partition B/C claimed
+    int subset_sps_scanned = 0; ///< NALs before this were looked at for a subset SPS
     int i, ret = 0;
 
     h->has_slice = 0;
@@ -747,6 +748,41 @@ static int decode_nal_units(H264Context *h, AVBufferRef *buf_ref,
         H264SliceContext *queued;
         int max_slice_ctx, err;
 
+        /* An encoder is free to put the subset SPS between the base view slices
+         * and the dependent view slices of the access unit it belongs to, and
+         * the ones in mp4 and Matroska do exactly that. Picking it up in NAL
+         * order would leave the views unknown while the first access unit is
+         * decoded, and its dependent slices would be dropped below. Parse those
+         * ahead of the base view slices instead, but no further: a packet may
+         * start with the dependent view of the previous access unit, which the
+         * subset SPS of a new coded video sequence does not apply to. Subset
+         * SPSs have their own id space (ps.subset_sps_list) and cannot affect
+         * the base view, so this changes nothing else. */
+        if ((nal->type == H264_NAL_SLICE || nal->type == H264_NAL_IDR_SLICE ||
+             nal->type == H264_NAL_DPA) && i >= subset_sps_scanned) {
+            for (subset_sps_scanned = i + 1;
+                 subset_sps_scanned < h->pkt.nb_nals &&
+                 h->pkt.nals[subset_sps_scanned].type != H264_NAL_EXTEN_SLICE;
+                 subset_sps_scanned++) {
+                const H2645NAL *sub = &h->pkt.nals[subset_sps_scanned];
+                if (sub->type == H264_NAL_SUB_SPS) {
+                    /* on a copy: the NAL is parsed again in NAL order */
+                    GetBitContext tmp_gb = sub->gb;
+                    ff_h264_decode_subset_seq_parameter_set(&tmp_gb, avctx, &h->ps);
+                }
+            }
+            /* Likewise, the view list has to come from the subset SPS the
+             * dependent view refers to, which takes its PPS. */
+            if (subset_sps_scanned < h->pkt.nb_nals) {
+                int sps_id = ff_h264_exten_slice_sps_id(&h->ps,
+                                                        &h->pkt.nals[subset_sps_scanned],
+                                                        h->pkt.nals + i + 1,
+                                                        subset_sps_scanned - i - 1);
+                if (sps_id >= 0 && h->ps.subset_sps_list[sps_id]->mvc.num_views > 1)
+                    h->ps.used_mvc_sps_id = sps_id;
+            }
+        }
+
         if (avctx->skip_frame >= AVDISCARD_NONREF &&
             nal->ref_idc == 0 && nal->type != H264_NAL_SEI)
             continue;
@@ -774,14 +810,12 @@ static int decode_nal_units(H264Context *h, AVBufferRef *buf_ref,
         case H264_NAL_SLICE:
         case H264_NAL_DPA:
         case H264_NAL_EXTEN_SLICE:
-            /* A coded slice extension carries a dependent view. Skip it unless we
-             * were asked to decode more than the base view. */
-            if (nal->type == H264_NAL_EXTEN_SLICE && h->views_active_decode == 1) {
-                h->skipped_view_slices = 1;
-                break;
-            }
-
-            h->has_slice = 1;
+            /* Even with only the base view selected, a coded slice extension
+             * goes to ff_h264_queue_decode_slice(): its parameter sets may make
+             * more views available, which get_format() can then select. That
+             * sets has_slice if the slice is decoded. */
+            if (nal->type != H264_NAL_EXTEN_SLICE)
+                h->has_slice = 1;
 
             if (nal->type == H264_NAL_DPA) {
                 /* partitioned streams all come from JM or a derivative */
@@ -819,7 +853,7 @@ static int decode_nal_units(H264Context *h, AVBufferRef *buf_ref,
             if (nal->type == H264_NAL_DPA && queued)
                 dp_attached_to = h264_attach_partitions(h, queued, i);
 
-            if (h->current_slice == 1) {
+            if (queued && h->current_slice == 1) {
                 if (avctx->active_thread_type & FF_THREAD_FRAME &&
                     i >= nals_needed && !h->setup_finished && h->cur_pic_ptr) {
                     ret = h264_decode_late_sei(h, i);
@@ -1143,6 +1177,18 @@ static int finalize_frame(H264Context *h, H264Picture *out)
         ret = output_frame(h, dst, out);
         if (ret < 0)
             return ret;
+
+        /* A base view picture started before the subset SPS of its access unit
+         * arrived could not be tagged when it was allocated. */
+        if (h->nb_views > 1 && !av_frame_get_side_data(dst, AV_FRAME_DATA_VIEW_ID)) {
+            AVFrameSideData *sd = av_frame_new_side_data(dst, AV_FRAME_DATA_VIEW_ID,
+                                                         sizeof(int));
+            if (!sd) {
+                av_frame_unref(dst);
+                return AVERROR(ENOMEM);
+            }
+            *(int *)sd->data = out->view_id;
+        }
 
         if (CONFIG_MPEGVIDEODEC) {
             ff_print_debug_info2(h->avctx, dst,
