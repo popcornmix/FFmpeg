@@ -99,6 +99,8 @@ static void h264_copy_picture_params(H264Picture *dst, const H264Picture *src)
     dst->gray          = src->gray;
     dst->invalid_gap   = src->invalid_gap;
     dst->sei_recovery_frame_cnt = src->sei_recovery_frame_cnt;
+    dst->view_id       = src->view_id;
+    dst->base_view_pic = src->base_view_pic;
     dst->mb_width      = src->mb_width;
     dst->mb_height     = src->mb_height;
     dst->mb_stride     = src->mb_stride;

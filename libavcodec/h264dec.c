@@ -991,6 +991,18 @@ static int finalize_frame(H264Context *h, H264Picture *out)
     AVFrame *dst = h->output_frame;
     int ret;
 
+
+    /* A view the caller did not ask for is decoded -- a dependent view needs the
+     * views below it -- but not output. This has to be checked for the base view
+     * too, which is otherwise emitted even when only a dependent view was
+     * requested. */
+    if (h->nb_views > 1) {
+        int voidx = ff_h264_view_idx(h, out->view_id);
+
+        if (voidx < 0 || !(h->views_active_output & (1 << voidx)))
+            return 0;
+    }
+
     if (((h->avctx->flags & AV_CODEC_FLAG_OUTPUT_CORRUPT) ||
          (h->avctx->flags2 & AV_CODEC_FLAG2_SHOW_ALL) ||
          out->recovered)) {
@@ -1049,6 +1061,52 @@ static int finalize_frame(H264Context *h, H264Picture *out)
 }
 
 /**
+ * Resolve the dependent view pictures paired with a base view picture that has
+ * left the reorder buffer.
+ *
+ * The hold keeping them alive is dropped either way; they are additionally output
+ * if the base view picture they belong to is itself being output. Both views of an
+ * access unit share a POC and are presented together, so a dependent view picture
+ * follows its base view partner immediately.
+ */
+static int resolve_view_pair(H264Context *h, H264Picture *base, int output)
+{
+    if (!base || h->nb_views < 2)
+        return 0;
+
+    for (int i = 0; i < H264_MAX_PICTURE_COUNT; i++) {
+        H264Picture *dep = &h->DPB[i];
+
+        if (!dep->f->buf[0] || dep->base_view_pic < 0 ||
+            &h->DPB[dep->base_view_pic] != base)
+            continue;
+
+        dep->base_view_pic = -1;
+        dep->reference    &= ~DELAYED_PIC_REF;
+
+        if (output) {
+            int ret;
+
+            dep->recovered |= base->recovered;
+            /* Both views of an access unit are presented together, so the
+             * dependent view picture is timed by its base view partner. It
+             * cannot time itself: in a stream whose packets do not start on an
+             * access unit boundary it is decoded from the packet after the one
+             * its access unit began in, and would take that packet's
+             * timestamps. */
+            dep->f->pts      = base->f->pts;
+            dep->f->pkt_dts  = base->f->pkt_dts;
+            dep->f->duration = base->f->duration;
+            ret = finalize_frame(h, dep);
+            if (ret < 0)
+                return ret;
+        }
+    }
+
+    return 0;
+}
+
+/**
  * Push every picture still held for reordering onto the output fifo.
  */
 static int send_delayed_frames(H264Context *h)
@@ -1083,8 +1141,13 @@ static int send_delayed_frames(H264Context *h)
             ret = finalize_frame(h, out);
             if (ret < 0)
                 return ret;
+            ret = resolve_view_pair(h, out, 1);
+            if (ret < 0)
+                return ret;
         }
     }
+
+    h->pending_pair_pic = NULL;
 
     return 0;
 }
@@ -1148,10 +1211,18 @@ static int h264_decode_packet(AVCodecContext *avctx, AVPacket *avpkt)
                 return ret;
         }
 
+        /* A base view picture that left the reorder buffer without being output
+         * still has to let go of its dependent views, or they accumulate in the
+         * DPB until it runs dry. */
+        ret = resolve_view_pair(h, h->pending_pair_pic,
+                                h->pending_pair_pic == h->next_output_pic);
+        h->pending_pair_pic = NULL;
         /* Handed over; the hold release_unused_pictures() keeps on it must end
          * here, or the next packet's frame_start() sees a stale pointer and
          * leaves the picture occupying a DPB slot for another access unit. */
         h->next_output_pic = NULL;
+        if (ret < 0)
+            return ret;
     }
 
     ff_h264_unref_picture(&h->last_pic_for_ec);

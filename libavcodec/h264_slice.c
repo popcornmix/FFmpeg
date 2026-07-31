@@ -199,6 +199,18 @@ static int alloc_picture(H264Context *h, H264Picture *pic)
             return ret;
     }
 
+    /* Add the view ID side data before the buffer is allocated, so that it is
+     * visible to get_buffer(). Only nontrivial multiview streams are tagged. */
+    if (h->nb_views > 1) {
+        AVFrameSideData *sd = av_frame_side_data_new(&pic->f->side_data,
+                                                     &pic->f->nb_side_data,
+                                                     AV_FRAME_DATA_VIEW_ID,
+                                                     sizeof(int), 0);
+        if (!sd)
+            return AVERROR(ENOMEM);
+        *(int*)sd->data = pic->view_id;
+    }
+
     pic->tf.f = pic->f;
     ret = ff_thread_get_ext_buffer(h->avctx, &pic->tf,
                                    pic->reference ? AV_GET_BUFFER_FLAG_REF : 0);
@@ -545,6 +557,9 @@ static int h264_frame_start(H264Context *h)
     pic->reference              = h->droppable ? 0 : h->picture_structure;
     pic->field_picture          = h->picture_structure != PICT_FRAME;
     pic->frame_num               = h->poc.frame_num;
+    pic->view_id                = (h->cur_view < h->nb_view_ids_available) ?
+                                  h->view_ids_available[h->cur_view] : 0;
+    pic->base_view_pic          = -1;
     /*
      * Zero key_frame here; IDR markings per slice in frame or fields are ORed
      * in later.
@@ -611,7 +626,11 @@ static int h264_frame_start(H264Context *h)
 
     h->cur_pic_ptr->field_poc[0] = h->cur_pic_ptr->field_poc[1] = INT_MAX;
 
-    h->next_output_pic = NULL;
+    /* Output selection is driven by the base view, whose picture starts first in
+     * an access unit; a dependent view starting afterwards must not discard the
+     * selection made for it. */
+    if (!h->cur_view)
+        h->next_output_pic = NULL;
 
     h->postpone_filter = 0;
 
@@ -1316,6 +1335,27 @@ static int h264_init_ps(H264Context *h, const H264SliceContext *sl, int first_sl
     }
     h->avctx->chroma_sample_location = sps->vui.chroma_location;
 
+    /* The subset SPS that declares the views need not be available when the first
+     * slice arrives -- in mp4 and Matroska it is carried in band rather than in
+     * extradata -- so pick it up whenever it appears. This deliberately does not
+     * force a context reinit: doing so would flush the DPB and change base view
+     * output. The consequence is that a caller which selects views from its
+     * get_format() callback only sees views that were already known by then;
+     * setting view_ids up front always works. */
+    if (!h->cur_view && first_slice) {
+        const SPS *mvc_sps = find_mvc_sps(&h->ps);
+
+        if (mvc_sps != h->mvc_sps) {
+            h->mvc_sps = mvc_sps;
+            ret = export_multiview(h, mvc_sps);
+            if (ret < 0)
+                return ret;
+            ret = setup_multiview(h, mvc_sps);
+            if (ret < 0)
+                return ret;
+        }
+    }
+
     if (!h->context_initialized || must_reinit || needs_reinit) {
         int flush_changes = h->context_initialized;
         const SPS *mvc_sps = find_mvc_sps(&h->ps);
@@ -1497,6 +1537,16 @@ static int h264_select_output_frame(H264Context *h)
     cur->mmco_reset = h->mmco_reset;
     h->mmco_reset = 0;
 
+    /* Both views of an access unit share a POC, so running the reordering logic
+     * for each of them would be meaningless. Reordering is driven by the base
+     * view alone; a dependent view picture is held until the base view picture it
+     * is paired with is output, and then emitted alongside it. */
+    if (h->cur_view) {
+        if (cur->reference == 0)
+            cur->reference = DELAYED_PIC_REF;
+        return 0;
+    }
+
     if (sps->bitstream_restriction_flag ||
         h->avctx->strict_std_compliance >= FF_COMPLIANCE_STRICT) {
         h->avctx->has_b_frames = FFMAX(h->avctx->has_b_frames, sps->num_reorder_frames);
@@ -1554,6 +1604,7 @@ static int h264_select_output_frame(H264Context *h)
 
     if (out_of_order || pics > h->avctx->has_b_frames) {
         out->reference &= ~DELAYED_PIC_REF;
+        h->pending_pair_pic = out;
         for (i = out_idx; h->delayed_pic[i]; i++)
             h->delayed_pic[i] = h->delayed_pic[i + 1];
     }
@@ -1858,6 +1909,11 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
     }
 
     h->views[h->cur_view].cur_pic_ptr = h->cur_pic_ptr;
+
+    /* Pair a dependent view picture with the base view picture of the same access
+     * unit, so that the two can be output together. */
+    h->cur_pic_ptr->base_view_pic = (h->cur_view && h->views[0].cur_pic_ptr) ?
+                                    h->views[0].cur_pic_ptr - h->DPB : -1;
 
     h->cur_pic_ptr->f->flags |= AV_FRAME_FLAG_KEY * !!(ff_h264_nal_is_idr(nal));
 

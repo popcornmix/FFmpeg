@@ -155,6 +155,14 @@ typedef struct H264Picture {
 
     const PPS   *pps;
 
+    /** MVC view_id of this picture; 0 for a stream that is not multiview */
+    int view_id;
+    /**
+     * For a dependent view picture, the DPB index of the base view picture of the
+     * same access unit, else -1. Used to pair the views up at output time.
+     */
+    int base_view_pic;
+
     int mb_width, mb_height;
     int mb_stride;
 
@@ -597,6 +605,13 @@ typedef struct H264Context {
      * @name MVC (H.264 Annex H) multiview state
      * @{
      */
+    /**
+     * The subset SPS whose MVC extension declared the current view list, used
+     * only to notice when it appears or changes. Borrowed, never dereferenced
+     * after the fact.
+     */
+    const SPS *mvc_sps;
+
     /** Per-view decoding state, indexed by view order index (VOIdx). */
     H264ViewContext views[H264_MAX_MVC_VIEWS];
 
@@ -613,6 +628,12 @@ typedef struct H264Context {
      * layer only fills AVFrame.pkt_dts in for the decode() callback.
      */
     int64_t pkt_dts;
+    /**
+     * The base view picture that most recently left the reorder buffer, and whose
+     * paired dependent view pictures therefore need resolving: output alongside it
+     * if it is being output, dropped with it otherwise.
+     */
+    H264Picture *pending_pair_pic;
     /**
      * Number of views in the active subset SPS, or 0 if the stream is not
      * multiview (or its MVC extension is unsupported).
