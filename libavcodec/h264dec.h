@@ -257,6 +257,8 @@ typedef struct H264SliceContext {
 
     int redundant_pic_count;
 
+    /** whether this is a coded slice extension, i.e. belongs to a dependent view */
+    int is_mvc;
     /** anchor_pic_flag of the MVC NAL unit header, 0 for a base view slice */
     int anchor_pic_flag;
 
