@@ -2161,6 +2161,7 @@ static int h264_slice_header_parse(const H264Context *h, H264SliceContext *sl,
         return AVERROR_PATCHWELCOME;
     }
 
+    sl->is_mvc          = nal->type == H264_NAL_EXTEN_SLICE;
     sl->anchor_pic_flag = nal->anchor_pic_flag;
 
     sl->frame_num = get_bits(&sl->gb, sps->log2_max_frame_num);
