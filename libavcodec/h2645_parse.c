@@ -455,6 +455,54 @@ static int h264_parse_nal_header(H2645NAL *nal, void *logctx)
     nal->ref_idc = get_bits(gb, 2);
     nal->type    = get_bits(gb, 5);
 
+    /* NALs are reused between packets, so these must always be initialised. */
+    nal->view_id         = -1;
+    nal->anchor_pic_flag = 0;
+    nal->inter_view_flag = 0;
+    nal->non_idr_flag    = 0;
+
+    if (nal->type == H264_NAL_PREFIX || nal->type == H264_NAL_EXTEN_SLICE ||
+        nal->type == H264_NAL_DEPTH_EXTEN_SLICE) {
+        /* nal_unit_header_svc_extension() and nal_unit_header_mvc_extension() are
+         * both three bytes wide, including the svc_extension_flag.
+         *
+         * Read them from the NAL bytes rather than through gb. A prefix NAL unit
+         * carrying no payload is exactly these four bytes, and its last one is
+         * reserved_one_bit; get_bit_length() takes that set bit for the RBSP stop
+         * bit and strips it, so gb would be one bit short of the header it is
+         * about to read. */
+        const uint8_t *ext = nal->data + 1;
+
+        if (nal->size < 4)
+            return AVERROR_INVALIDDATA;
+
+        if (ext[0] & 0x80) {            // svc_extension_flag
+            /* SVC (Annex F) is not supported; the NAL is ignored rather than
+             * misparsed. */
+        } else {
+            nal->non_idr_flag    =  (ext[0] >> 6) & 1;
+                                    // priority_id, ext[0] & 0x3f
+            nal->view_id         = ((ext[1] << 2) | (ext[2] >> 6)) & 0x3ff;
+            nal->temporal_id     =  (ext[2] >> 3) & 7;
+            nal->anchor_pic_flag =  (ext[2] >> 2) & 1;
+            nal->inter_view_flag =  (ext[2] >> 1) & 1;
+                                    // reserved_one_bit, ext[2] & 1
+
+            av_log(logctx, AV_LOG_DEBUG,
+                   "nal_unit_type: %d(%s), nal_ref_idc: %d, view_id: %d, "
+                   "temporal_id: %d, anchor: %d, inter_view: %d\n",
+                   nal->type, h264_nal_unit_name(nal->type), nal->ref_idc,
+                   nal->view_id, nal->temporal_id, nal->anchor_pic_flag,
+                   nal->inter_view_flag);
+        }
+
+        /* Leave gb at the payload, i.e. at slice_header() for a coded slice
+         * extension. A header-only prefix NAL has none, and then there may be
+         * fewer than 24 bits left for the reason above. */
+        skip_bits(gb, FFMIN(24, get_bits_left(gb)));
+        return 0;
+    }
+
     av_log(logctx, AV_LOG_DEBUG,
            "nal_unit_type: %d(%s), nal_ref_idc: %d\n",
            nal->type, h264_nal_unit_name(nal->type), nal->ref_idc);
