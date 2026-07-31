@@ -585,6 +585,20 @@ typedef struct H264Context {
      */
     /** Per-view decoding state, indexed by view order index (VOIdx). */
     H264ViewContext views[H264_MAX_MVC_VIEWS];
+
+    /**
+     * Frames ready for output. A multiview access unit produces one frame per
+     * view, so a single packet can yield more than one frame.
+     */
+    struct AVContainerFifo *output_fifo;
+    /** Scratch frame used to hand a finished picture to ::output_fifo. */
+    AVFrame *output_frame;
+    /**
+     * DTS of the packet being decoded, stamped onto every frame pushed to
+     * ::output_fifo. receive_frame() decoders do this themselves; the generic
+     * layer only fills AVFrame.pkt_dts in for the decode() callback.
+     */
+    int64_t pkt_dts;
     /**
      * Number of views in the active subset SPS, or 0 if the stream is not
      * multiview (or its MVC extension is unsupported).

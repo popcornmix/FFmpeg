@@ -31,6 +31,7 @@
 
 #include "libavutil/attributes.h"
 #include "libavutil/avassert.h"
+#include "libavutil/container_fifo.h"
 #include "libavutil/emms.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/mem.h"
@@ -40,6 +41,7 @@
 #include "libavutil/video_enc_params.h"
 
 #include "codec_internal.h"
+#include "decode.h"
 #include "internal.h"
 #include "error_resilience.h"
 #include "avcodec.h"
@@ -312,6 +314,14 @@ static int h264_init_context(AVCodecContext *avctx, H264Context *h)
 
     ff_h264_sei_uninit(&h->sei);
 
+    h->output_fifo = av_container_fifo_alloc_avframe(0);
+    if (!h->output_fifo)
+        return AVERROR(ENOMEM);
+
+    h->output_frame = av_frame_alloc();
+    if (!h->output_frame)
+        return AVERROR(ENOMEM);
+
     if (avctx->active_thread_type & FF_THREAD_FRAME) {
         h->decode_error_flags_pool = av_refstruct_pool_alloc(sizeof(atomic_int), 0);
         if (!h->decode_error_flags_pool)
@@ -381,6 +391,9 @@ static av_cold int h264_decode_end(AVCodecContext *avctx)
     h->nb_view_ids_available = 0;
     av_freep(&h->view_pos_available);
     h->nb_view_pos_available = 0;
+
+    av_container_fifo_free(&h->output_fifo);
+    av_frame_free(&h->output_frame);
 
     return 0;
 }
@@ -499,6 +512,9 @@ static av_cold void h264_decode_flush(AVCodecContext *avctx)
     int i;
 
     memset(h->delayed_pic, 0, sizeof(h->delayed_pic));
+
+    av_container_fifo_drain(h->output_fifo,
+                            av_container_fifo_can_read(h->output_fifo));
 
     ff_h264_flush_change(h);
     ff_h264_sei_uninit(&h->sei);
@@ -945,8 +961,12 @@ static int is_avcc_extradata(const uint8_t *buf, int buf_size)
     return 1;
 }
 
-static int finalize_frame(H264Context *h, AVFrame *dst, H264Picture *out, int *got_frame)
+/**
+ * Make a finished picture available for output by pushing it onto h->output_fifo.
+ */
+static int finalize_frame(H264Context *h, H264Picture *out)
 {
+    AVFrame *dst = h->output_frame;
     int ret;
 
     if (((h->avctx->flags & AV_CODEC_FLAG_OUTPUT_CORRUPT) ||
@@ -986,8 +1006,6 @@ static int finalize_frame(H264Context *h, AVFrame *dst, H264Picture *out, int *g
         if (ret < 0)
             return ret;
 
-        *got_frame = 1;
-
         if (CONFIG_MPEGVIDEODEC) {
             ff_print_debug_info2(h->avctx, dst,
                                  out->mb_type,
@@ -995,13 +1013,23 @@ static int finalize_frame(H264Context *h, AVFrame *dst, H264Picture *out, int *g
                                  out->motion_val,
                                  out->mb_width, out->mb_height, out->mb_stride, 1);
         }
+
+        dst->pkt_dts = h->pkt_dts;
+
+        /* Transfers ownership of dst's references to the fifo. */
+        ret = av_container_fifo_write(h->output_fifo, dst, 0);
+        av_frame_unref(dst);
+        if (ret < 0)
+            return ret;
     }
 
     return 0;
 }
 
-static int send_next_delayed_frame(H264Context *h, AVFrame *dst_frame,
-                                   int *got_frame, int buf_index)
+/**
+ * Push every picture still held for reordering onto the output fifo.
+ */
+static int send_delayed_frames(H264Context *h)
 {
     int ret, i, out_idx;
     H264Picture *out;
@@ -1030,19 +1058,16 @@ static int send_next_delayed_frame(H264Context *h, AVFrame *dst_frame,
             out->recovered |= h->frame_recovered & FRAME_RECOVERED_SEI;
 
             out->reference &= ~DELAYED_PIC_REF;
-            ret = finalize_frame(h, dst_frame, out, got_frame);
+            ret = finalize_frame(h, out);
             if (ret < 0)
                 return ret;
-            if (*got_frame)
-                break;
         }
     }
 
-    return buf_index;
+    return 0;
 }
 
-static int h264_decode_frame(AVCodecContext *avctx, AVFrame *pict,
-                             int *got_frame, AVPacket *avpkt)
+static int h264_decode_packet(AVCodecContext *avctx, AVPacket *avpkt)
 {
     const uint8_t *buf = avpkt->data;
     int buf_size       = avpkt->size;
@@ -1056,10 +1081,6 @@ static int h264_decode_frame(AVCodecContext *avctx, AVFrame *pict,
 
     ff_h264_unref_picture(&h->last_pic_for_ec);
 
-    /* end of stream, output what is still in the buffers */
-    if (buf_size == 0)
-        return send_next_delayed_frame(h, pict, got_frame, 0);
-
     if (av_packet_get_side_data(avpkt, AV_PKT_DATA_NEW_EXTRADATA, NULL)) {
         size_t side_size;
         uint8_t *side = av_packet_get_side_data(avpkt, AV_PKT_DATA_NEW_EXTRADATA, &side_size);
@@ -1068,10 +1089,12 @@ static int h264_decode_frame(AVCodecContext *avctx, AVFrame *pict,
                                  avctx->err_recognition, avctx);
     }
     if (h->is_avc && buf_size >= 9 && buf[0]==1 && buf[2]==0 && (buf[4]&0xFC)==0xFC) {
-        if (is_avcc_extradata(buf, buf_size))
-            return ff_h264_decode_extradata(buf, buf_size,
-                                            &h->ps, &h->is_avc, &h->nal_length_size,
-                                            avctx->err_recognition, avctx);
+        if (is_avcc_extradata(buf, buf_size)) {
+            ret = ff_h264_decode_extradata(buf, buf_size,
+                                           &h->ps, &h->is_avc, &h->nal_length_size,
+                                           avctx->err_recognition, avctx);
+            return ret < 0 ? ret : 0;
+        }
     }
 
     buf_index = decode_nal_units(h, avpkt->buf, buf, buf_size);
@@ -1080,13 +1103,13 @@ static int h264_decode_frame(AVCodecContext *avctx, AVFrame *pict,
 
     if (!h->cur_pic_ptr && h->nal_unit_type == H264_NAL_END_SEQUENCE) {
         av_assert0(buf_index <= buf_size);
-        return send_next_delayed_frame(h, pict, got_frame, buf_index);
+        return send_delayed_frames(h);
     }
 
     if (!(avctx->flags2 & AV_CODEC_FLAG2_CHUNKS) && (!h->cur_pic_ptr || !h->has_slice)) {
         if (avctx->skip_frame >= AVDISCARD_NONREF ||
             buf_size >= 4 && !memcmp("Q264", buf, 4))
-            return buf_size;
+            return 0;
         av_log(avctx, AV_LOG_ERROR, "no frame!\n");
         return AVERROR_INVALIDDATA;
     }
@@ -1098,17 +1121,51 @@ static int h264_decode_frame(AVCodecContext *avctx, AVFrame *pict,
 
         /* Wait for second field. */
         if (h->next_output_pic) {
-            ret = finalize_frame(h, pict, h->next_output_pic, got_frame);
+            ret = finalize_frame(h, h->next_output_pic);
             if (ret < 0)
                 return ret;
         }
     }
 
-    av_assert0(pict->buf[0] || !*got_frame);
-
     ff_h264_unref_picture(&h->last_pic_for_ec);
 
-    return buf_size;
+    return 0;
+}
+
+static int h264_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+{
+    H264Context      *h    = avctx->priv_data;
+    AVCodecInternal  *avci = avctx->internal;
+    AVPacket         *avpkt = avci->in_pkt;
+    int ret;
+
+    h->pkt_dts = AV_NOPTS_VALUE;
+
+    if (av_container_fifo_can_read(h->output_fifo))
+        goto do_output;
+
+    av_packet_unref(avpkt);
+    ret = ff_decode_get_packet(avctx, avpkt);
+    if (ret == AVERROR_EOF) {
+        /* end of stream, output what is still held for reordering */
+        ret = send_delayed_frames(h);
+        if (ret < 0)
+            return ret;
+        goto do_output;
+    } else if (ret < 0)
+        return ret;
+
+    h->pkt_dts = avpkt->dts;
+
+    ret = h264_decode_packet(avctx, avpkt);
+    if (ret < 0)
+        return ret;
+
+do_output:
+    if (av_container_fifo_read(h->output_fifo, frame, 0) >= 0)
+        return 0;
+
+    return avci->draining ? AVERROR_EOF : AVERROR(EAGAIN);
 }
 
 #define OFFSET(x) offsetof(H264Context, x)
@@ -1151,7 +1208,7 @@ const FFCodec ff_h264_decoder = {
     .priv_data_size        = sizeof(H264Context),
     .init                  = h264_decode_init,
     .close                 = h264_decode_end,
-    FF_CODEC_DECODE_CB(h264_decode_frame),
+    FF_CODEC_RECEIVE_FRAME_CB(h264_receive_frame),
     .p.capabilities        = AV_CODEC_CAP_DR1 |
                              AV_CODEC_CAP_DELAY | AV_CODEC_CAP_SLICE_THREADS |
                              AV_CODEC_CAP_FRAME_THREADS,
