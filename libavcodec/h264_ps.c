@@ -271,18 +271,154 @@ void ff_h264_ps_uninit(H264ParamSets *ps)
 {
     int i;
 
-    for (i = 0; i < MAX_SPS_COUNT; i++)
+    for (i = 0; i < MAX_SPS_COUNT; i++) {
         av_refstruct_unref(&ps->sps_list[i]);
+        av_refstruct_unref(&ps->subset_sps_list[i]);
+    }
 
     for (i = 0; i < MAX_PPS_COUNT; i++)
         av_refstruct_unref(&ps->pps_list[i]);
+    ps->subset_sps_ignored = 0;
 
     av_refstruct_unref(&ps->pps);
     ps->sps = NULL;
 }
 
-int ff_h264_decode_seq_parameter_set(GetBitContext *gb, AVCodecContext *avctx,
-                                     H264ParamSets *ps, int ignore_truncation)
+/**
+ * Parse seq_parameter_set_mvc_extension(), G.7.3.2.1.4.
+ *
+ * On success sps->mvc.num_views is the number of views; on unsupported input it
+ * is left at 0 and 0 is still returned, so that the subset SPS remains usable
+ * for base-view-only decoding.
+ */
+static int decode_sps_mvc_extension(GetBitContext *gb, AVCodecContext *avctx,
+                                    SPS *sps)
+{
+    SPSMVCExt *mvc = &sps->mvc;
+    unsigned num_views, num_level_values;
+
+    num_views = get_ue_golomb_long(gb) + 1;
+    if (num_views > H264_MAX_MVC_VIEWS) {
+        avpriv_report_missing_feature(avctx, "MVC with %u views", num_views);
+        return 0;
+    }
+
+    for (int i = 0; i < num_views; i++) {
+        unsigned view_id = get_ue_golomb_long(gb);
+        if (view_id > 1023) {
+            av_log(avctx, AV_LOG_ERROR, "Invalid view_id %u\n", view_id);
+            return AVERROR_INVALIDDATA;
+        }
+        mvc->view_id[i] = view_id;
+    }
+
+    /* The anchor and non-anchor inter-view dependency lists. Note l0 and l1 are
+     * interleaved within each iteration of i. */
+    for (int i = 1; i < num_views; i++) {
+        for (int list = 0; list < 2; list++) {
+            unsigned n = get_ue_golomb_31(gb);
+            if (n >= H264_MAX_MVC_REFS) {
+                av_log(avctx, AV_LOG_ERROR,
+                       "Invalid num_anchor_refs_l%d[%d] %u\n", list, i, n);
+                return AVERROR_INVALIDDATA;
+            }
+            mvc->num_anchor_refs[list][i] = n;
+            for (int j = 0; j < n; j++) {
+                unsigned ref_id = get_ue_golomb_long(gb);
+                if (ref_id > 1023) {
+                    av_log(avctx, AV_LOG_ERROR,
+                           "Invalid anchor_ref_l%d[%d][%d] %u\n", list, i, j, ref_id);
+                    return AVERROR_INVALIDDATA;
+                }
+                mvc->anchor_ref[list][i][j] = ref_id;
+            }
+        }
+    }
+    for (int i = 1; i < num_views; i++) {
+        for (int list = 0; list < 2; list++) {
+            unsigned n = get_ue_golomb_31(gb);
+            if (n >= H264_MAX_MVC_REFS) {
+                av_log(avctx, AV_LOG_ERROR,
+                       "Invalid num_non_anchor_refs_l%d[%d] %u\n", list, i, n);
+                return AVERROR_INVALIDDATA;
+            }
+            mvc->num_non_anchor_refs[list][i] = n;
+            for (int j = 0; j < n; j++) {
+                unsigned ref_id = get_ue_golomb_long(gb);
+                if (ref_id > 1023) {
+                    av_log(avctx, AV_LOG_ERROR,
+                           "Invalid non_anchor_ref_l%d[%d][%d] %u\n", list, i, j, ref_id);
+                    return AVERROR_INVALIDDATA;
+                }
+                mvc->non_anchor_ref[list][i][j] = ref_id;
+            }
+        }
+    }
+
+    /* The level / operation point table is parsed only to consume it; we have no
+     * use for the operation points. */
+    /* num_level_values_signalled_minus1 is in [0, 63], so this needs a reader
+     * wider than get_ue_golomb_31(). The operation point table that follows is
+     * only consumed, never stored, but its counts still come from the bitstream,
+     * so bound them and watch for overread as the loops run rather than only
+     * once they are done. */
+    num_level_values = get_ue_golomb_long(gb) + 1;
+    if (num_level_values > 64) {
+        av_log(avctx, AV_LOG_ERROR,
+               "Invalid num_level_values_signalled_minus1 %u\n",
+               num_level_values - 1);
+        return AVERROR_INVALIDDATA;
+    }
+    for (int i = 0; i < num_level_values; i++) {
+        unsigned num_ops;
+
+        skip_bits(gb, 8);                        // level_idc
+        num_ops = get_ue_golomb_long(gb) + 1;
+        if (num_ops > 1024)
+            goto invalid_ops;
+        for (int j = 0; j < num_ops; j++) {
+            unsigned num_target_views;
+
+            skip_bits(gb, 3);                    // applicable_op_temporal_id
+            num_target_views = get_ue_golomb_long(gb) + 1;
+            if (num_target_views > 1024)
+                goto invalid_ops;
+            for (int k = 0; k < num_target_views; k++)
+                get_ue_golomb_long(gb);          // applicable_op_target_view_id
+            get_ue_golomb_long(gb);              // applicable_op_num_views_minus1
+
+            if (get_bits_left(gb) < 0)
+                goto overread;
+        }
+        if (get_bits_left(gb) < 0)
+            goto overread;
+    }
+
+    mvc->num_views = num_views;
+
+    if (avctx->debug & FF_DEBUG_PICT_INFO) {
+        for (int i = 0; i < num_views; i++)
+            av_log(avctx, AV_LOG_DEBUG,
+                   "mvc: voidx:%d view_id:%u anchor_refs:%d/%d non_anchor_refs:%d/%d\n",
+                   i, mvc->view_id[i],
+                   mvc->num_anchor_refs[0][i],     mvc->num_anchor_refs[1][i],
+                   mvc->num_non_anchor_refs[0][i], mvc->num_non_anchor_refs[1][i]);
+    }
+
+    return 0;
+
+invalid_ops:
+    av_log(avctx, AV_LOG_ERROR, "Invalid MVC operation point table\n");
+    return AVERROR_INVALIDDATA;
+
+overread:
+    av_log(avctx, AV_LOG_ERROR, "Overread MVC SPS extension\n");
+    return AVERROR_INVALIDDATA;
+}
+
+static int decode_seq_parameter_set(GetBitContext *gb, AVCodecContext *avctx,
+                                    H264ParamSets *ps, int ignore_truncation,
+                                    int subset)
 {
     int profile_idc, level_idc, constraint_set_flags = 0;
     unsigned int sps_id;
@@ -532,6 +668,20 @@ int ff_h264_decode_seq_parameter_set(GetBitContext *gb, AVCodecContext *avctx,
             goto fail;
     }
 
+    /* The remainder of subset_seq_parameter_set_rbsp(), G.7.3.2.1.3. Only the
+     * MVC profiles get this far, see ff_h264_decode_subset_seq_parameter_set(). */
+    sps->is_subset = subset;
+    if (subset) {
+        if (!get_bits1(gb)) {   // bit_equal_to_one
+            av_log(avctx, AV_LOG_ERROR,
+                   "Invalid subset SPS: bit_equal_to_one is 0\n");
+            goto fail;
+        }
+        ret = decode_sps_mvc_extension(gb, avctx, sps);
+        if (ret < 0)
+            goto fail;
+    }
+
     if (get_bits_left(gb) < 0) {
         av_log_once(avctx, ignore_truncation ? AV_LOG_WARNING : AV_LOG_ERROR, AV_LOG_DEBUG,
                     &ps->overread_warning_printed[sps->vui_parameters_present_flag],
@@ -578,8 +728,19 @@ int ff_h264_decode_seq_parameter_set(GetBitContext *gb, AVCodecContext *avctx,
     /* check if this is a repeat of an already parsed SPS, then keep the
      * original one.
      * otherwise drop all PPSes that depend on it */
-    if (ps->sps_list[sps_id] &&
-        !memcmp(ps->sps_list[sps_id], sps, sizeof(*sps))) {
+    if (subset) {
+        if (ps->subset_sps_list[sps_id] &&
+            !memcmp(ps->subset_sps_list[sps_id], sps, sizeof(*sps))) {
+            av_refstruct_unref(&sps);
+        } else {
+            av_refstruct_unref(&ps->subset_sps_list[sps_id]);
+            ps->subset_sps_list[sps_id] = sps;
+        }
+        ps->subset_sps_ignored &= ~(1U << sps_id);
+        if (ps->subset_sps_list[sps_id]->mvc.num_views > 1)
+            ps->latest_mvc_sps_id = sps_id;
+    } else if (ps->sps_list[sps_id] &&
+               !memcmp(ps->sps_list[sps_id], sps, sizeof(*sps))) {
         av_refstruct_unref(&sps);
     } else {
         remove_sps(ps, sps_id);
@@ -591,6 +752,41 @@ int ff_h264_decode_seq_parameter_set(GetBitContext *gb, AVCodecContext *avctx,
 fail:
     av_refstruct_unref(&sps);
     return AVERROR_INVALIDDATA;
+}
+
+int ff_h264_decode_seq_parameter_set(GetBitContext *gb, AVCodecContext *avctx,
+                                     H264ParamSets *ps, int ignore_truncation)
+{
+    return decode_seq_parameter_set(gb, avctx, ps, ignore_truncation, 0);
+}
+
+int ff_h264_decode_subset_seq_parameter_set(GetBitContext *gb, AVCodecContext *avctx,
+                                            H264ParamSets *ps)
+{
+    GetBitContext peek = *gb;
+    int profile_idc = get_bits(&peek, 8);
+
+    /* Only the MVC profiles are supported. The others -- SVC, MFC, MVCD and
+     * 3D-AVC -- carry fields seq_parameter_set_data() is not parsed for here,
+     * so their subset SPSs would come out as garbage. Their slices are skipped
+     * in any case, so drop the subset SPS instead, and with it any earlier one
+     * of the same id, which this one replaces. */
+    if (profile_idc != 118 && profile_idc != 128) {
+        unsigned sps_id;
+
+        skip_bits(&peek, 16);   // constraint flags, level_idc
+        sps_id = get_ue_golomb_31(&peek);
+        av_log(avctx, AV_LOG_VERBOSE,
+               "Ignoring subset SPS %u with unsupported profile_idc %d\n",
+               sps_id, profile_idc);
+        if (sps_id < MAX_SPS_COUNT) {
+            av_refstruct_unref(&ps->subset_sps_list[sps_id]);
+            ps->subset_sps_ignored |= 1U << sps_id;
+        }
+        return 0;
+    }
+
+    return decode_seq_parameter_set(gb, avctx, ps, 0, 1);
 }
 
 static void init_dequant8_coeff_table(PPS *pps, const SPS *sps)
@@ -729,14 +925,31 @@ int ff_h264_decode_picture_parameter_set(GetBitContext *gb, AVCodecContext *avct
 
     pps->pps_id = pps_id;
     pps->sps_id = get_ue_golomb_31(gb);
+    /* A PPS referenced by a coded slice extension (NAL 20) refers to a subset
+     * SPS, which lives in its own id space. As the two spaces are disjoint in
+     * practice we cannot tell from the PPS alone which one is meant, so resolve
+     * against both and let the slice header pick by NAL type. */
+    if ((unsigned)pps->sps_id < MAX_SPS_COUNT && !ps->sps_list[pps->sps_id] &&
+        (ps->subset_sps_ignored & (1U << pps->sps_id))) {
+        /* only used by the slices of a view that is not supported */
+        av_log(avctx, AV_LOG_VERBOSE,
+               "Ignoring PPS %u of ignored subset SPS %u\n", pps_id, pps->sps_id);
+        remove_pps(ps, pps_id);
+        ret = 0;
+        goto fail;
+    }
     if ((unsigned)pps->sps_id >= MAX_SPS_COUNT ||
-        !ps->sps_list[pps->sps_id]) {
+        (!ps->sps_list[pps->sps_id] && !ps->subset_sps_list[pps->sps_id])) {
         av_log(avctx, AV_LOG_ERROR, "sps_id %u out of range\n", pps->sps_id);
         ret = AVERROR_INVALIDDATA;
         goto fail;
     }
-    pps->sps = av_refstruct_ref_c(ps->sps_list[pps->sps_id]);
-    sps      = pps->sps;
+    /* av_refstruct_replace() rather than av_refstruct_ref_c(), as either list
+     * entry may be NULL here. */
+    av_refstruct_replace(&pps->sps, ps->sps_list[pps->sps_id] ?
+                                    ps->sps_list[pps->sps_id] :
+                                    ps->subset_sps_list[pps->sps_id]);
+    sps = pps->sps;
 
     if (sps->bit_depth_luma > 14) {
         av_log(avctx, AV_LOG_ERROR,
