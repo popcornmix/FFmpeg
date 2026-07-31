@@ -1147,6 +1147,11 @@ static int h264_decode_packet(AVCodecContext *avctx, AVPacket *avpkt)
             if (ret < 0)
                 return ret;
         }
+
+        /* Handed over; the hold release_unused_pictures() keeps on it must end
+         * here, or the next packet's frame_start() sees a stale pointer and
+         * leaves the picture occupying a DPB slot for another access unit. */
+        h->next_output_pic = NULL;
     }
 
     ff_h264_unref_picture(&h->last_pic_for_ec);
