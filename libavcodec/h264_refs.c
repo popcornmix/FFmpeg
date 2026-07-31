@@ -570,6 +570,13 @@ static inline int unreference_pic(H264Context *h, H264Picture *pic, int refmask)
     if (pic->reference &= refmask) {
         return 0;
     } else {
+        /* A dependent view picture is not in delayed_pic -- reordering is driven
+         * by the base view -- but is still awaiting output alongside the base view
+         * picture it is paired with, until resolve_view_pair() clears the link. */
+        if (pic->base_view_pic >= 0) {
+            pic->reference = DELAYED_PIC_REF;
+            return 1;
+        }
         for (int i = 0; h->delayed_pic[i]; i++)
             if(pic == h->delayed_pic[i]){
                 pic->reference = DELAYED_PIC_REF;
@@ -891,10 +898,14 @@ int ff_h264_execute_ref_pic_marking(H264Context *h)
             for (int j = 0; j < 16; j++)
                 remove_long(h, j, 0);
             h->poc.frame_num = h->cur_pic_ptr->frame_num = 0;
-            h->mmco_reset = 1;
             h->cur_pic_ptr->mmco_reset = 1;
-            for (int j = 0; j < FF_ARRAY_ELEMS(h->last_pocs); j++)
-                h->last_pocs[j] = INT_MIN;
+            /* The output order state belongs to the base view, which drives
+             * reordering for every view. */
+            if (!h->cur_view) {
+                h->mmco_reset = 1;
+                for (int j = 0; j < FF_ARRAY_ELEMS(h->last_pocs); j++)
+                    h->last_pocs[j] = INT_MIN;
+            }
             break;
         default: av_assert0(0);
         }
