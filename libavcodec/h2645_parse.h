@@ -66,6 +66,19 @@ typedef struct H2645NAL {
      */
     int nuh_layer_id;
 
+    /**
+     * H.264 MVC only, from nal_unit_header_mvc_extension() (H.7.3.1.1), which is
+     * present on NAL types 14, 20 and 21 only.
+     *
+     * view_id is -1 when this NAL has no MVC extension header, either because
+     * its type does not carry one or because it carries an SVC one instead; the
+     * other fields are then meaningless.
+     */
+    int view_id;
+    uint8_t anchor_pic_flag;
+    uint8_t inter_view_flag;
+    uint8_t non_idr_flag;
+
     int skipped_bytes;
     int skipped_bytes_pos_size;
     int *skipped_bytes_pos;
