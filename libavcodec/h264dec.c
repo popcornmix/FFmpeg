@@ -443,13 +443,25 @@ static av_cold int h264_decode_init(AVCodecContext *avctx)
  */
 static void idr(H264Context *h)
 {
-    int i;
-    ff_h264_remove_all_refs(h);
-    h->poc.prev_frame_num        =
-    h->poc.prev_frame_num_offset = 0;
-    h->poc.prev_poc_msb          = 1<<16;
-    h->poc.prev_poc_lsb          = -1;
-    for (i = 0; i < FF_ARRAY_ELEMS(h->last_pocs); i++)
+    const unsigned prev_view = h->cur_view;
+
+    /* An IDR access unit starts a new coded video sequence in every view, so all
+     * of them are emptied -- not just the one that happens to be swapped in.
+     * Otherwise a dependent view left mid-sequence restores its stale references
+     * and prev_frame_num at the next view switch, which shows up as spurious
+     * frame_num gap concealment and reference list overflow right after the IDR. */
+    for (unsigned view = 0; view < FF_ARRAY_ELEMS(h->views); view++) {
+        ff_h264_view_switch(h, view);
+
+        ff_h264_remove_all_refs(h);
+        h->poc.prev_frame_num        =
+        h->poc.prev_frame_num_offset = 0;
+        h->poc.prev_poc_msb          = 1<<16;
+        h->poc.prev_poc_lsb          = -1;
+    }
+    ff_h264_view_switch(h, prev_view);
+
+    for (int i = 0; i < FF_ARRAY_ELEMS(h->last_pocs); i++)
         h->last_pocs[i] = INT_MIN;
 }
 
@@ -471,6 +483,8 @@ void ff_h264_flush_change(H264Context *h)
         h->delayed_pic[j] = NULL;
     }
     ff_h264_unref_picture(&h->last_pic_for_ec);
+
+    ff_h264_view_reset(h);
 
     h->first_field = 0;
     h->recovery_frame = -1;

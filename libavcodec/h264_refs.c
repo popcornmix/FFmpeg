@@ -585,6 +585,51 @@ void ff_h264_remove_all_refs(H264Context *h)
     memset(h->default_ref, 0, sizeof(h->default_ref));
 }
 
+void ff_h264_view_switch(H264Context *h, unsigned view)
+{
+    H264ViewContext *v;
+
+    av_assert1(view < FF_ARRAY_ELEMS(h->views));
+
+    if (view == h->cur_view)
+        return;
+
+    /* save the outgoing view */
+    v = &h->views[h->cur_view];
+    v->poc             = h->poc;
+    v->short_ref_count = h->short_ref_count;
+    v->long_ref_count  = h->long_ref_count;
+    memcpy(v->short_ref, h->short_ref, sizeof(v->short_ref));
+    memcpy(v->long_ref,  h->long_ref,  sizeof(v->long_ref));
+
+    /* restore the incoming one */
+    v = &h->views[view];
+    h->poc             = v->poc;
+    h->short_ref_count = v->short_ref_count;
+    h->long_ref_count  = v->long_ref_count;
+    memcpy(h->short_ref, v->short_ref, sizeof(h->short_ref));
+    memcpy(h->long_ref,  v->long_ref,  sizeof(h->long_ref));
+
+    h->cur_view = view;
+}
+
+void ff_h264_view_reset(H264Context *h)
+{
+    for (int i = 0; i < FF_ARRAY_ELEMS(h->views); i++) {
+        H264ViewContext *v = &h->views[i];
+
+        /* The pictures themselves are owned by the DPB, which is torn down
+         * separately; only the per-view bookkeeping is dropped here. */
+        memset(v->short_ref, 0, sizeof(v->short_ref));
+        memset(v->long_ref,  0, sizeof(v->long_ref));
+        v->short_ref_count = 0;
+        v->long_ref_count  = 0;
+        v->cur_pic_ptr     = NULL;
+        memset(&v->poc, 0, sizeof(v->poc));
+    }
+    h->cur_view = 0;
+}
+
 static void generate_sliding_window_mmcos(H264Context *h)
 {
     MMCO *mmco = h->mmco;

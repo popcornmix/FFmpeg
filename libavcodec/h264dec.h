@@ -333,6 +333,33 @@ typedef struct H264SliceContext {
 } H264SliceContext;
 
 /**
+ * Per-view decoding state for MVC (H.264 Annex H).
+ *
+ * An MVC access unit is strictly ordered -- all base view slices, then all slices
+ * of each dependent view -- so only one view is ever being decoded at a time.
+ * Rather than addressing every view's state explicitly, the state of the view
+ * currently being decoded stays in the H264Context fields it has always lived in,
+ * and ff_h264_view_switch() swaps it in and out of here at view boundaries. That
+ * way the macroblock layer, the reference list code and all the hwaccels keep
+ * addressing h->cur_pic_ptr, h->short_ref and h->poc directly and need no
+ * knowledge of views whatsoever.
+ */
+typedef struct H264ViewContext {
+    H264POCContext  poc;
+    H264Picture    *short_ref[32];
+    H264Picture    *long_ref[32];
+    int             short_ref_count;
+    int             long_ref_count;
+
+    /**
+     * The picture this view holds for the access unit being decoded, used to pair
+     * the views up at output time. Unlike the fields above this is not swapped;
+     * it stays valid across a view switch.
+     */
+    H264Picture    *cur_pic_ptr;
+} H264ViewContext;
+
+/**
  * H264Context
  */
 typedef struct H264Context {
@@ -556,6 +583,8 @@ typedef struct H264Context {
      * @name MVC (H.264 Annex H) multiview state
      * @{
      */
+    /** Per-view decoding state, indexed by view order index (VOIdx). */
+    H264ViewContext views[H264_MAX_MVC_VIEWS];
     /**
      * Number of views in the active subset SPS, or 0 if the stream is not
      * multiview (or its MVC extension is unsupported).
@@ -621,6 +650,21 @@ int ff_h264_alloc_tables(H264Context *h);
 int ff_h264_decode_ref_pic_list_reordering(H264SliceContext *sl, void *logctx);
 int ff_h264_build_ref_list(H264Context *h, H264SliceContext *sl);
 void ff_h264_remove_all_refs(H264Context *h);
+
+/**
+ * Make @p view the view being decoded, saving the state of the previously
+ * current view and restoring that of @p view.
+ *
+ * Must be called at every view boundary within an access unit, and to return to
+ * the base view before starting the next one. Calling it for the view that is
+ * already current is a no-op.
+ */
+void ff_h264_view_switch(H264Context *h, unsigned view);
+
+/**
+ * Reset all per-view state, as at an IDR or a flush.
+ */
+void ff_h264_view_reset(H264Context *h);
 
 /**
  * Execute the reference picture marking (memory management control operations).
