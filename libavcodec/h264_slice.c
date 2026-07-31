@@ -30,6 +30,7 @@
 #include "libavutil/avassert.h"
 #include "libavutil/mem.h"
 #include "libavutil/pixdesc.h"
+#include "libavutil/stereo3d.h"
 #include "libavutil/timecode.h"
 #include "decode.h"
 #include "cabac.h"
@@ -422,6 +423,26 @@ int ff_h264_update_thread_context(AVCodecContext *dst,
     h->is_avc = h1->is_avc;
     h->nal_length_size = h1->nal_length_size;
 
+    h->nb_views            = h1->nb_views;
+    h->views_active_decode = h1->views_active_decode;
+    h->views_active_output = h1->views_active_output;
+
+    /* view_ids may be set by the caller from get_format() mid-stream, so it has
+     * to be propagated; the exported arrays are re-derived by each thread. */
+    if (h->nb_view_ids != h1->nb_view_ids ||
+        memcmp(h->view_ids, h1->view_ids, sizeof(*h->view_ids) * h->nb_view_ids)) {
+        av_freep(&h->view_ids);
+        h->nb_view_ids = 0;
+
+        if (h1->nb_view_ids) {
+            h->view_ids = av_memdup(h1->view_ids,
+                                    h1->nb_view_ids * sizeof(*h1->view_ids));
+            if (!h->view_ids)
+                return AVERROR(ENOMEM);
+            h->nb_view_ids = h1->nb_view_ids;
+        }
+    }
+
     memcpy(&h->poc,        &h1->poc,        sizeof(h->poc));
 
     memcpy(h->short_ref,   h1->short_ref,   sizeof(h->short_ref));
@@ -786,6 +807,120 @@ static void init_scan_tables(H264Context *h)
     }
 }
 
+/**
+ * Find the subset SPS describing the views of an MVC stream.
+ *
+ * Unlike HEVC, where the layer list lives in the VPS, H.264 carries it in the
+ * MVC extension of a subset SPS. A conforming MVC stream has exactly one such
+ * set of views, so the first usable subset SPS is authoritative; it is also
+ * available before the first slice of the base view, which is what lets the
+ * view list be exported from get_format().
+ */
+static const SPS *find_mvc_sps(const H264ParamSets *ps)
+{
+    for (int i = 0; i < MAX_SPS_COUNT; i++) {
+        const SPS *sps = ps->subset_sps_list[i];
+        if (sps && sps->mvc.num_views > 1)
+            return sps;
+    }
+    return NULL;
+}
+
+/**
+ * Export the list of available views to the caller, so that it is readable from
+ * the get_format() callback.
+ */
+static int export_multiview(H264Context *h, const SPS *mvc_sps)
+{
+    av_freep(&h->view_ids_available);
+    h->nb_view_ids_available = 0;
+    av_freep(&h->view_pos_available);
+    h->nb_view_pos_available = 0;
+
+    if (!mvc_sps)
+        return 0;
+
+    h->view_ids_available = av_calloc(mvc_sps->mvc.num_views,
+                                      sizeof(*h->view_ids_available));
+    if (!h->view_ids_available)
+        return AVERROR(ENOMEM);
+
+    for (int i = 0; i < mvc_sps->mvc.num_views; i++)
+        h->view_ids_available[i] = mvc_sps->mvc.view_id[i];
+    h->nb_view_ids_available = mvc_sps->mvc.num_views;
+
+    /* H.264 has no equivalent of the MV-HEVC 3D reference displays info SEI that
+     * would map views onto eyes, so leave view_pos_available empty. */
+
+    return 0;
+}
+
+/**
+ * Turn the caller's view_ids request into decode/output bitmasks.
+ */
+static int setup_multiview(H264Context *h, const SPS *mvc_sps)
+{
+    unsigned views_active_output = 0, highest_view;
+
+    h->nb_views            = mvc_sps ? mvc_sps->mvc.num_views : 0;
+    h->views_active_decode = 1;
+    h->views_active_output = 1;
+
+    /* nothing requested, or nothing to choose from - base view only */
+    if (!h->nb_view_ids || !mvc_sps)
+        return 0;
+
+    if (h->nb_view_ids == 1 && h->view_ids[0] == -1) {
+        views_active_output = (1 << h->nb_views) - 1;
+    } else {
+        for (int i = 0; i < h->nb_view_ids; i++) {
+            int view_id = h->view_ids[i];
+            int voidx   = -1;
+
+            if (view_id < 0) {
+                av_log(h->avctx, AV_LOG_ERROR,
+                       "Invalid view ID requested: %d\n", view_id);
+                return AVERROR(EINVAL);
+            }
+
+            for (int j = 0; j < h->nb_views; j++) {
+                if (mvc_sps->mvc.view_id[j] == view_id) {
+                    voidx = j;
+                    break;
+                }
+            }
+            if (voidx < 0) {
+                av_log(h->avctx, AV_LOG_ERROR,
+                       "View ID %d not present in the subset SPS\n", view_id);
+                return AVERROR(EINVAL);
+            }
+            views_active_output |= 1 << voidx;
+        }
+    }
+
+    if (!views_active_output) {
+        av_log(h->avctx, AV_LOG_ERROR, "No views selected\n");
+        return AVERROR_BUG;
+    }
+
+    highest_view = av_log2(views_active_output);
+    if (highest_view >= H264_MAX_MVC_VIEWS) {
+        av_log(h->avctx, AV_LOG_ERROR, "Too many views requested: %x\n",
+               views_active_output);
+        return AVERROR(EINVAL);
+    }
+
+    /* A non-base view may depend on any lower view, so decoding the highest
+     * requested view implies decoding everything below it. */
+    h->views_active_decode = (1 << (highest_view + 1)) - 1;
+    h->views_active_output = views_active_output;
+
+    av_log(h->avctx, AV_LOG_DEBUG, "decode/output views: %x/%x\n",
+           h->views_active_decode, h->views_active_output);
+
+    return 0;
+}
+
 static enum AVPixelFormat get_pixel_format(H264Context *h, int force_callback)
 {
 #define HWACCEL_MAX (CONFIG_H264_DXVA2_HWACCEL + \
@@ -1144,6 +1279,7 @@ static int h264_init_ps(H264Context *h, const H264SliceContext *sl, int first_sl
 
     if (!h->context_initialized || must_reinit || needs_reinit) {
         int flush_changes = h->context_initialized;
+        const SPS *mvc_sps = find_mvc_sps(&h->ps);
         h->context_initialized = 0;
         if (sl != h->slice_ctx) {
             av_log(h->avctx, AV_LOG_ERROR,
@@ -1160,9 +1296,20 @@ static int h264_init_ps(H264Context *h, const H264SliceContext *sl, int first_sl
         if (flush_changes)
             ff_h264_flush_change(h);
 
+        /* Export the available views before ff_get_format() so that the caller
+         * can pick views from its get_format() callback, then act on whatever it
+         * asked for. */
+        ret = export_multiview(h, mvc_sps);
+        if (ret < 0)
+            return ret;
+
         if ((ret = get_pixel_format(h, must_reinit || needs_reinit)) < 0)
             return ret;
         h->avctx->pix_fmt = ret;
+
+        ret = setup_multiview(h, mvc_sps);
+        if (ret < 0)
+            return ret;
 
         av_log(h->avctx, AV_LOG_VERBOSE, "Reinit context to %dx%d, "
                "pix_fmt: %s\n", h->width, h->height, av_get_pix_fmt_name(h->avctx->pix_fmt));

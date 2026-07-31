@@ -552,6 +552,32 @@ typedef struct H264Context {
      * slices) anymore */
     int setup_finished;
 
+    /**
+     * @name MVC (H.264 Annex H) multiview state
+     * @{
+     */
+    /**
+     * Number of views in the active subset SPS, or 0 if the stream is not
+     * multiview (or its MVC extension is unsupported).
+     */
+    unsigned nb_views;
+    /** VOIdx of the view currently being decoded. */
+    unsigned cur_view;
+    /** Bitmasks of VOIdx that are decoded / output. Bit 0 (base view) is always set. */
+    unsigned views_active_decode;
+    unsigned views_active_output;
+
+    /* multiview AVOptions, mirroring the hevc decoder */
+    int         *view_ids;
+    unsigned  nb_view_ids;
+
+    unsigned    *view_ids_available;
+    unsigned  nb_view_ids_available;
+
+    unsigned    *view_pos_available;
+    unsigned  nb_view_pos_available;
+    /** @} */
+
     int cur_chroma_format_idc;
     int cur_bit_depth_luma;
     int16_t slice_row[MAX_SLICES]; ///< to detect when MAX_SLICES is too low
