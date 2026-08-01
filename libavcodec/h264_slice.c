@@ -1568,7 +1568,12 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
                 ff_thread_report_progress(&h->short_ref[0]->tf, INT_MAX, 0);
                 if (h->short_ref[0]->field_picture)
                     ff_thread_report_progress(&h->short_ref[0]->tf, INT_MAX, 1);
-            } else if (!h->frame_recovered) {
+            } else {
+                /* No picture to conceal from: the buffer this dummy was just
+                 * allocated from holds whatever the last user left in it, and it
+                 * is about to be predicted from, so it has to be initialised.
+                 * Skipping this once the stream had recovered made the decoded
+                 * output depend on allocator reuse. */
                 if (!h->avctx->hwaccel)
                     color_frame(h->short_ref[0]->f, c);
                 h->short_ref[0]->gray = 1;
