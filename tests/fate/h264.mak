@@ -250,6 +250,12 @@ FATE_H264-$(call FRAMECRC, MPEGTS, H264, H264_PARSER MP3_DECODER SCALE_FILTER AR
 # a lone non-IDR first field with frame_num 0, its second field lost, ahead of an
 # IDR field of the opposite parity, which must not be decoded as its second field
 FATE_H264-$(call FRAMECRC, H264, H264, H264_PARSER CONCAT_PROTOCOL SUBFILE_PROTOCOL) += fate-h264-field-before-idr
+
+FATE_H264-$(call FRAMECRC, H264, H264, H264_PARSER) += fate-h264-mvc-base fate-h264-mvc-dependent \
+    fate-h264-mvc-skip-nokey fate-h264-mvc-skip-loop-filter-nokey
+FATE_H264-$(call FRAMECRC, H264, H264, H264_PARSER SETPTS_FILTER CONCAT_PROTOCOL) += fate-h264-mvc-2idr
+FATE_H264-$(call FRAMECRC, H264, H264, H264_PARSER SETPTS_FILTER) += fate-h264-mvc-both fate-h264-mvc-field
+
 FATE_H264_FFPROBE-$(call DEMDEC, MATROSKA, H264) += fate-h264-dts_5frames
 FATE_H264_FFPROBE-$(call PARSERDEMDEC, H264, H264, H264) += fate-h264-afd
 
@@ -484,6 +490,25 @@ fate-h264-missing-frame:                          CMD = framecrc -i $(TARGET_SAM
 fate-h264-timecode:                               CMD = framecrc -i $(TARGET_SAMPLES)/h264/crew_cif_timecode-2.h264
 
 fate-h264-reinit-%:                               CMD = framecrc -i $(TARGET_SAMPLES)/h264/$(@:fate-h264-%=%).h264 -vf scale,format=yuv444p10le,scale=w=352:h=288
+
+# MVC, two views. The dependent view predicts from the base view, so the base
+# view is decoded for all of these. The first three differ only in the output
+# selection; 2idr reads the sample twice, for an IDR in the middle of the
+# stream; the last two check that the IDR picture of the dependent view, which
+# is inter-view predicted, counts as a key picture.
+fate-h264-mvc-base:                               CMD = framecrc -i $(TARGET_SAMPLES)/h264/mvc-2view.264 -map "0:view:0"
+fate-h264-mvc-dependent:                          CMD = framecrc -i $(TARGET_SAMPLES)/h264/mvc-2view.264 -map "0:view:1"
+fate-h264-mvc-both:                               CMD = framecrc -i $(TARGET_SAMPLES)/h264/mvc-2view.264 \
+                                                        -map "0:view:0" -map "0:view:1" -vf setpts=N:strip_fps=1
+fate-h264-mvc-2idr:                               CMD = framecrc -i "concat:$(TARGET_SAMPLES)/h264/mvc-2view.264|$(TARGET_SAMPLES)/h264/mvc-2view.264" \
+                                                        -map "0:view:0" -map "0:view:1" -vf setpts=N:strip_fps=1
+# Field coded, with the parameter sets of the dependent view repeated before
+# each of its fields, where the parser cuts the packets: each holds a field of
+# the dependent view and the next field of the base view.
+fate-h264-mvc-field:                              CMD = framecrc -i $(TARGET_SAMPLES)/h264/mvc-2view-field.264 \
+                                                        -map "0:view:0" -map "0:view:1" -vf setpts=N:strip_fps=1
+fate-h264-mvc-skip-nokey:                         CMD = framecrc -view_ids 1 -skip_frame nokey -i $(TARGET_SAMPLES)/h264/mvc-2view.264
+fate-h264-mvc-skip-loop-filter-nokey:             CMD = framecrc -view_ids 1 -skip_loop_filter nokey -i $(TARGET_SAMPLES)/h264/mvc-2view.264 -frames:v 1
 
 fate-h264-dts_5frames:                            CMD = probeframes $(TARGET_SAMPLES)/h264/dts_5frames.mkv
 fate-h264-afd:                                    CMD = run ffprobe$(PROGSSUF)$(EXESUF) -bitexact -apply_cropping 0 \
