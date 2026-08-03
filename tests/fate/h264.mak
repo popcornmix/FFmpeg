@@ -246,6 +246,8 @@ FATE_H264-$(call FRAMECRC, MXF, H264, PCM_S24LE_DECODER SCALE_FILTER ARESAMPLE_F
 FATE_H264-$(call FRAMECRC, MOV, H264) += fate-h264-attachment-631
 FATE_H264-$(call FRAMECRC, MPEGTS, H264, H264_PARSER MP3_DECODER SCALE_FILTER ARESAMPLE_FILTER) += fate-h264-skip-nokey
 FATE_H264-$(call FRAMECRC, MPEGTS, H264, H264_PARSER MP3_DECODER SCALE_FILTER ARESAMPLE_FILTER EXTRACT_EXTRADATA_BSF) += fate-h264-skip-nointra
+FATE_H264-$(call FRAMECRC, H264, H264) += fate-h264-mvc-base fate-h264-mvc-both fate-h264-mvc-dependent
+
 FATE_H264_FFPROBE-$(call DEMDEC, MATROSKA, H264) += fate-h264-dts_5frames
 FATE_H264_FFPROBE-$(call PARSERDEMDEC, H264, H264, H264) += fate-h264-afd
 
@@ -477,6 +479,13 @@ fate-h264-missing-frame:                          CMD = framecrc -i $(TARGET_SAM
 fate-h264-timecode:                               CMD = framecrc -i $(TARGET_SAMPLES)/h264/crew_cif_timecode-2.h264
 
 fate-h264-reinit-%:                               CMD = framecrc -i $(TARGET_SAMPLES)/h264/$(@:fate-h264-%=%).h264 -vf scale,format=yuv444p10le,scale=w=352:h=288
+
+# MVC, two views. The dependent view predicts from the base view, so the base
+# view is decoded for all three of these; only the output selection differs.
+fate-h264-mvc-base:                               CMD = framecrc -i $(TARGET_SAMPLES)/h264/mvc-2view.264 -map "0:view:0"
+fate-h264-mvc-dependent:                          CMD = framecrc -i $(TARGET_SAMPLES)/h264/mvc-2view.264 -map "0:view:1"
+fate-h264-mvc-both:                               CMD = framecrc -i $(TARGET_SAMPLES)/h264/mvc-2view.264 \
+                                                        -map "0:view:0" -map "0:view:1" -vf setpts=N:strip_fps=1
 
 fate-h264-dts_5frames:                            CMD = probeframes $(TARGET_SAMPLES)/h264/dts_5frames.mkv
 fate-h264-afd:                                    CMD = run ffprobe$(PROGSSUF)$(EXESUF) -bitexact -apply_cropping 0 \

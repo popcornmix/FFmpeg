@@ -38,6 +38,51 @@ Select an operating point of a scalable AV1 bitstream (0 - 31). Default is 0.
 
 @end table
 
+@section h264
+H.264 (AKA ITU-T H.264 or ISO/IEC 14496-10) decoder.
+
+The decoder supports MVC multiview streams (H.264 Annex H) with at most two
+views. Views to be output are selected by supplying a list of view IDs to the
+decoder (the @option{view_ids} option). This option may be set either statically
+before decoder init, or from the @code{get_format()} callback - useful because
+the subset SPS that declares the views is often carried in band rather than in
+extradata, so the views are not always known when the decoder is opened.
+
+Only the base view is decoded by default.
+
+Multiview decoding is not available with hardware acceleration; only the base
+view is decoded and a warning is logged. Frame and slice threading both work,
+as do field coded streams.
+
+Note that if you are using the @code{ffmpeg} CLI tool, you should be using view
+specifiers as documented in its manual, rather than the options documented here.
+
+@subsection Options
+
+@table @option
+
+@item view_ids (MVC)
+Specify a list of view IDs that should be output. This option can also be set to
+a single '-1', which will cause all views defined in the subset SPS to be
+decoded and output.
+
+@item view_ids_available (MVC)
+This option may be read by the caller to retrieve an array of view IDs available
+in the active subset SPS. The array is empty for single-view video.
+
+The value of this option is guaranteed to be accurate when read from the
+@code{get_format()} callback. It may also be set at other times (e.g. after
+opening the decoder), but the value is informational only.
+
+@item view_pos_available (MVC)
+This option may be read by the caller to retrieve an array of view positions
+(left, right, or unspecified) available in the active subset SPS, as
+@code{AVStereo3DView} values. H.264 has no equivalent of the MV-HEVC 3D
+reference displays information SEI message, so this array is left empty and
+positions are reported as unspecified.
+
+@end table
+
 @section hevc
 HEVC (AKA ITU-T H.265 or ISO/IEC 23008-2) decoder.
 
