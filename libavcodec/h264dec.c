@@ -1059,7 +1059,8 @@ end:
      * ever completes that picture, so a frame thread awaiting it, as the frame
      * num gap concealment does, waits forever. Complete them here as well. */
     for (unsigned v = 0; h->nb_views > 1 && v < FF_ARRAY_ELEMS(h->views); v++) {
-        H264Picture *pic = h->views[v].cur_pic_ptr;
+        const H264ViewContext *vc = &h->views[v];
+        H264Picture *pic = vc->cur_pic_ptr;
 
         if (!pic || pic == h->cur_pic_ptr || !pic->f->buf[0])
             continue;
@@ -1068,6 +1069,11 @@ end:
          * before, which that thread is still decoding into; completing it here
          * would release a waiter onto rows that have not been written yet. */
         if (pic->tf.owner[0] != h->avctx)
+            continue;
+        /* Nor one that is a first field whose second one is still to come in a
+         * later packet -- that picture is not complete, and saying it is would
+         * hand a waiting thread an undecoded field. */
+        if (vc->first_field && vc->pending_field_pic == pic)
             continue;
 
         ff_thread_report_progress(&pic->tf, INT_MAX, 0);
@@ -1267,8 +1273,17 @@ static int finalize_frame(H264Context *h, H264Picture *out)
  * access unit share a POC and are presented together, so a dependent view picture
  * follows its base view partner immediately.
  */
+static int awaits_second_field(const H264Context *h, const H264Picture *pic)
+{
+    const H264ViewContext *vc = &h->views[pic->voidx];
+
+    if (pic->voidx == h->cur_view)
+        return h->first_field && h->cur_pic_ptr == pic;
+    return vc->first_field && vc->pending_field_pic == pic;
+}
+
 int ff_h264_resolve_view_pair(H264Context *h, H264Picture *base, int output,
-                              int defer)
+                              int defer, int incomplete)
 {
     if (!base || h->nb_views < 2)
         return 0;
@@ -1278,6 +1293,13 @@ int ff_h264_resolve_view_pair(H264Context *h, H264Picture *base, int output,
 
         if (!dep->f->buf[0] || dep->base_view_pic < 0 ||
             &h->DPB[dep->base_view_pic] != base)
+            continue;
+        /* The base view picture of a field coded access unit is complete, and
+         * leaves the reorder buffer, before the second field of the dependent
+         * view starts -- in a stream whose packets do not start on an access
+         * unit boundary, not until the next packet. Output now would be of a
+         * single field; that second field resolves the pair instead. */
+        if (!incomplete && awaits_second_field(h, dep))
             continue;
 
         dep->base_view_pic = -1;
@@ -1325,6 +1347,12 @@ static int send_delayed_frames(H264Context *h)
     h->cur_pic_ptr = NULL;
     h->first_field = 0;
 
+    /* left the reorder buffer before any picture still in it */
+    ret = ff_h264_resolve_view_pair(h, h->pending_pair_pic,
+                                    h->pending_pair_output, 0, 1);
+    if (ret < 0)
+        return ret;
+
     while (h->delayed_pic[0]) {
         out = h->delayed_pic[0];
         out_idx = 0;
@@ -1349,7 +1377,7 @@ static int send_delayed_frames(H264Context *h)
             ret = finalize_frame(h, out);
             if (ret < 0)
                 return ret;
-            ret = ff_h264_resolve_view_pair(h, out, 1, 0);
+            ret = ff_h264_resolve_view_pair(h, out, 1, 0, 1);
             if (ret < 0)
                 return ret;
         }

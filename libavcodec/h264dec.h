@@ -397,6 +397,18 @@ typedef struct H264ViewContext {
      * it stays valid across a view switch.
      */
     H264Picture    *cur_pic_ptr;
+
+    /**
+     * Field pair state, swapped like the fields above. A field coded access unit
+     * carries one field of each view, so a view is left half way through a
+     * complementary pair whenever the next view starts, and each view has to
+     * remember its own pending field.
+     */
+    H264Picture    *pending_field_pic;
+    int             first_field;
+    int             picture_structure;
+    int             droppable;
+    int             missing_fields;
 } H264ViewContext;
 
 /**
@@ -766,10 +778,12 @@ void ff_h264_remove_all_refs(H264Context *h);
  * left the reorder buffer, and select them for output if the base view picture
  * is itself being output. With defer set the picture is recorded in
  * ::next_output_pic_dep rather than pushed to the output fifo, so that the
- * release is complete before ff_thread_finish_setup().
+ * release is complete before ff_thread_finish_setup(). A dependent view
+ * picture that is a first field still awaiting its second field stays paired,
+ * unless incomplete is set.
  */
 int ff_h264_resolve_view_pair(H264Context *h, H264Picture *base, int output,
-                              int defer);
+                              int defer, int incomplete);
 
 /**
  * Make @p view the view being decoded, saving the state of the previously
@@ -780,6 +794,7 @@ int ff_h264_resolve_view_pair(H264Context *h, H264Picture *base, int output,
  * already current is a no-op.
  */
 void ff_h264_view_switch(H264Context *h, unsigned view);
+int ff_h264_view_switch_fields(H264Context *h, unsigned view);
 
 /**
  * Write the live per view state back into the slot of the view that is

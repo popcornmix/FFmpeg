@@ -806,6 +806,51 @@ int ff_h264_view_idx(const H264Context *h, const SPS *sps, int view_id)
     return AVERROR_INVALIDDATA;
 }
 
+/* The field pair state has to follow the view too, but only when the switch is
+ * part of decoding a slice: idr() and the frame thread hand-over walk the views
+ * for their own reasons and must not disturb the picture being decoded. */
+int ff_h264_view_switch_fields(H264Context *h, unsigned view)
+{
+    H264ViewContext *out, *in;
+    int ret;
+
+    if (view == h->cur_view)
+        return 0;
+
+    out = &h->views[h->cur_view];
+    out->first_field       = h->first_field;
+    out->picture_structure = h->picture_structure;
+    out->droppable         = h->droppable;
+    out->missing_fields    = h->missing_fields;
+    out->pending_field_pic = h->first_field ? h->cur_pic_ptr : NULL;
+
+    in  = &h->views[view];
+    ff_h264_view_switch(h, view);
+
+    h->first_field       = in->first_field;
+    h->picture_structure = in->picture_structure;
+    h->droppable         = in->droppable;
+    h->missing_fields    = in->missing_fields;
+    h->cur_pic_ptr       = in->pending_field_pic;
+
+    /* h->cur_pic is a reference to the picture being decoded into, refreshed by
+     * h264_frame_start() -- which the second field of a complementary pair does
+     * not go through. Rebind it to the view being switched to, or that field
+     * would be decoded into whichever view started a picture most recently. */
+    ff_h264_unref_picture(&h->cur_pic);
+    if (h->cur_pic_ptr) {
+        ret = ff_h264_ref_picture(&h->cur_pic, h->cur_pic_ptr);
+        if (ret < 0)
+            return ret;
+        for (int i = 0; i < h->nb_slice_ctx; i++) {
+            h->slice_ctx[i].linesize   = h->cur_pic_ptr->f->linesize[0];
+            h->slice_ctx[i].uvlinesize = h->cur_pic_ptr->f->linesize[1];
+        }
+    }
+
+    return 0;
+}
+
 void ff_h264_view_switch(H264Context *h, unsigned view)
 {
     H264ViewContext *v;
@@ -835,13 +880,15 @@ void ff_h264_view_reset(H264Context *h)
         H264ViewContext *v = &h->views[i];
 
         /* The pictures themselves are owned by the DPB, which is torn down
-         * separately; only the per-view bookkeeping is dropped here. */
-        memset(v->short_ref, 0, sizeof(v->short_ref));
-        memset(v->long_ref,  0, sizeof(v->long_ref));
-        v->short_ref_count = 0;
-        v->long_ref_count  = 0;
-        v->cur_pic_ptr     = NULL;
-        memset(&v->poc, 0, sizeof(v->poc));
+         * separately; only the per-view bookkeeping is dropped here. Clearing the
+         * whole struct rather than naming fields keeps the half decoded field
+         * pair state from surviving a flush: pending_field_pic would otherwise be
+         * restored at the next view switch, pointing into a DPB that has since
+         * been emptied. */
+        memset(v, 0, sizeof(*v));
+        v->poc.prev_poc_msb   = 1 << 16;
+        v->poc.prev_poc_lsb   = -1;
+        v->poc.prev_frame_num = -1;
     }
     h->cur_view = 0;
 }
