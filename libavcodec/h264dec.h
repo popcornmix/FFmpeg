@@ -637,6 +637,23 @@ typedef struct H264Context {
      */
     H264Picture *pending_pair_pic;
     /**
+     * Whether ::pending_pair_pic was selected for output, and its paired dependent
+     * view pictures therefore have to be output too. Not derivable from
+     * ::next_output_pic, which is cleared once the picture has been copied out at
+     * the end of a packet: a stream whose access unit boundaries do not line up
+     * with its packets -- some Matroska files start a packet on the dependent view
+     * slices of the previous access unit -- reaches the dependent view only after
+     * that has happened.
+     */
+    int pending_pair_output;
+    /**
+     * Dependent view picture released by ::pending_pair_pic and due to be output
+     * with it. Handled exactly like ::next_output_pic: chosen during setup, so
+     * that a frame thread starting afterwards inherits no work, and copied out
+     * at the end of the packet.
+     */
+    H264Picture *next_output_pic_dep;
+    /**
      * Number of views in the active subset SPS, or 0 if the stream is not
      * multiview (or its MVC extension is unsupported).
      */
@@ -714,6 +731,16 @@ static inline int ff_h264_nal_is_idr(const H2645NAL *nal)
 }
 
 void ff_h264_remove_all_refs(H264Context *h);
+
+/**
+ * Release the dependent view pictures paired with a base view picture that has
+ * left the reorder buffer, and select them for output if the base view picture
+ * is itself being output. With defer set the picture is recorded in
+ * ::next_output_pic_dep rather than pushed to the output fifo, so that the
+ * release is complete before ff_thread_finish_setup().
+ */
+int ff_h264_resolve_view_pair(H264Context *h, H264Picture *base, int output,
+                              int defer);
 
 /**
  * Make @p view the view being decoded, saving the state of the previously

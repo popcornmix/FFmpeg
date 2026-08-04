@@ -123,6 +123,13 @@ static void release_unused_pictures(H264Context *h, int remove_current)
     for (i = 0; i < H264_MAX_PICTURE_COUNT; i++) {
         if (h->DPB[i].f->buf[0] && !h->DPB[i].reference &&
             &h->DPB[i] != h->next_output_pic &&
+            &h->DPB[i] != h->next_output_pic_dep &&
+            /* A base view picture that has left the reorder buffer is still needed
+             * by the dependent views of its access unit, which in a stream whose
+             * packets do not start on an access unit boundary are decoded after it
+             * has been output. Reclaiming it here would hand its slot straight to
+             * one of them, leaving that picture recorded as its own base view. */
+            (h->nb_views < 2 || &h->DPB[i] != h->pending_pair_pic) &&
             (remove_current || &h->DPB[i] != h->cur_pic_ptr)) {
             ff_h264_unref_picture(&h->DPB[i]);
         }
@@ -441,7 +448,7 @@ int ff_h264_update_thread_context(AVCodecContext *dst,
     h->views_active_output = h1->views_active_output;
 
     /* view_ids may be set by the caller from get_format() mid-stream, so it has
-     * to be propagated; the exported arrays are re-derived by each thread. */
+     * to be propagated. */
     if (h->nb_view_ids != h1->nb_view_ids ||
         memcmp(h->view_ids, h1->view_ids, sizeof(*h->view_ids) * h->nb_view_ids)) {
         av_freep(&h->view_ids);
@@ -456,6 +463,43 @@ int ff_h264_update_thread_context(AVCodecContext *dst,
         }
     }
 
+    /* The view list is derived when a subset SPS is parsed, which a thread that
+     * has not seen one cannot do -- and a picture allocated before it has is
+     * given view_id 0, so a dependent view picture would be tagged, output and
+     * counted as a base view one. Propagate it rather than waiting for the next
+     * subset SPS to come round. */
+    if (h->nb_view_ids_available != h1->nb_view_ids_available ||
+        memcmp(h->view_ids_available, h1->view_ids_available,
+               sizeof(*h->view_ids_available) * h->nb_view_ids_available)) {
+        av_freep(&h->view_ids_available);
+        h->nb_view_ids_available = 0;
+
+        if (h1->nb_view_ids_available) {
+            h->view_ids_available = av_memdup(h1->view_ids_available,
+                                              h1->nb_view_ids_available *
+                                              sizeof(*h1->view_ids_available));
+            if (!h->view_ids_available)
+                return AVERROR(ENOMEM);
+            h->nb_view_ids_available = h1->nb_view_ids_available;
+        }
+    }
+
+    if (h->nb_view_pos_available != h1->nb_view_pos_available ||
+        memcmp(h->view_pos_available, h1->view_pos_available,
+               sizeof(*h->view_pos_available) * h->nb_view_pos_available)) {
+        av_freep(&h->view_pos_available);
+        h->nb_view_pos_available = 0;
+
+        if (h1->nb_view_pos_available) {
+            h->view_pos_available = av_memdup(h1->view_pos_available,
+                                              h1->nb_view_pos_available *
+                                              sizeof(*h1->view_pos_available));
+            if (!h->view_pos_available)
+                return AVERROR(ENOMEM);
+            h->nb_view_pos_available = h1->nb_view_pos_available;
+        }
+    }
+
     memcpy(&h->poc,        &h1->poc,        sizeof(h->poc));
 
     memcpy(h->short_ref,   h1->short_ref,   sizeof(h->short_ref));
@@ -463,7 +507,10 @@ int ff_h264_update_thread_context(AVCodecContext *dst,
     memcpy(h->delayed_pic, h1->delayed_pic, sizeof(h->delayed_pic));
     memcpy(h->last_pocs,   h1->last_pocs,   sizeof(h->last_pocs));
 
-    h->next_output_pic   = h1->next_output_pic;
+    h->next_output_pic     = h1->next_output_pic;
+    h->next_output_pic_dep = REBASE_PICTURE(h1->next_output_pic_dep, h, h1);
+    h->pending_pair_pic    = REBASE_PICTURE(h1->pending_pair_pic, h, h1);
+    h->pending_pair_output = h1->pending_pair_output;
     h->next_outputed_poc = h1->next_outputed_poc;
     h->poc_offset        = h1->poc_offset;
 
@@ -629,8 +676,12 @@ static int h264_frame_start(H264Context *h)
     /* Output selection is driven by the base view, whose picture starts first in
      * an access unit; a dependent view starting afterwards must not discard the
      * selection made for it. */
-    if (!h->cur_view)
-        h->next_output_pic = NULL;
+    if (!h->cur_view) {
+        h->next_output_pic     = NULL;
+        h->next_output_pic_dep = NULL;
+        h->pending_pair_pic    = NULL;
+        h->pending_pair_output = 0;
+    }
 
     h->postpone_filter = 0;
 
@@ -1560,7 +1611,11 @@ static int h264_select_output_frame(H264Context *h)
     if (h->cur_view) {
         if (cur->reference == 0)
             cur->reference = DELAYED_PIC_REF;
-        return 0;
+        /* The base view picture of this access unit may have left the reorder
+         * buffer before this view started, which is what happens whenever the
+         * stream needs no reordering. Nothing else would come back for it. */
+        return ff_h264_resolve_view_pair(h, h->pending_pair_pic,
+                                         h->pending_pair_output, 1);
     }
 
     if (sps->bitstream_restriction_flag ||
@@ -1620,12 +1675,14 @@ static int h264_select_output_frame(H264Context *h)
 
     if (out_of_order || pics > h->avctx->has_b_frames) {
         out->reference &= ~DELAYED_PIC_REF;
-        h->pending_pair_pic = out;
+        h->pending_pair_pic    = out;
+        h->pending_pair_output = 0;
         for (i = out_idx; h->delayed_pic[i]; i++)
             h->delayed_pic[i] = h->delayed_pic[i + 1];
     }
     if (!out_of_order && pics > h->avctx->has_b_frames) {
-        h->next_output_pic = out;
+        h->next_output_pic     = out;
+        h->pending_pair_output = out == h->pending_pair_pic;
         if (out_idx == 0 && h->delayed_pic[0] && ((h->delayed_pic[0]->f->flags & AV_FRAME_FLAG_KEY) || h->delayed_pic[0]->mmco_reset)) {
             h->next_outputed_poc = INT_MIN;
         } else
@@ -1640,7 +1697,8 @@ static int h264_select_output_frame(H264Context *h)
         if (!out->recovered) {
             if (!(h->avctx->flags & AV_CODEC_FLAG_OUTPUT_CORRUPT) &&
                 !(h->avctx->flags2 & AV_CODEC_FLAG2_SHOW_ALL)) {
-                h->next_output_pic = NULL;
+                h->next_output_pic     = NULL;
+                h->pending_pair_output = 0;
             } else {
                 out->f->flags |= AV_FRAME_FLAG_CORRUPT;
             }
@@ -1649,7 +1707,12 @@ static int h264_select_output_frame(H264Context *h)
         av_log(h->avctx, AV_LOG_DEBUG, "no picture %s\n", out_of_order ? "ooo" : "");
     }
 
-    return 0;
+    /* Release whatever left the reorder buffer just now while still in setup, so
+     * that a frame thread starting after ff_thread_finish_setup() inherits no
+     * pending pairing. pending_pair_pic stays set until the next base view
+     * picture, for the dependent views of this access unit to find. */
+    return ff_h264_resolve_view_pair(h, h->pending_pair_pic,
+                                     h->pending_pair_output, 1);
 }
 
 /* This function is called right after decoding the slice header for a first
@@ -2374,6 +2437,19 @@ int ff_h264_queue_decode_slice(H264Context *h, const H2645NAL *nal)
     } else
         view = 0;
 
+    /* A slice of another view starts a new picture, and the header parsed below
+     * activates that view's parameter sets. Any slices still queued belong to the
+     * view we are leaving and have to be decoded against its parameter sets
+     * first. Unlike the field boundary handled further down, this is known from
+     * the NAL header alone, so the queue can be drained before parsing rather
+     * than after -- which is also what makes this the first slice of a picture. */
+    if (h->current_slice && view != h->cur_view && h->nb_slice_ctx_queued) {
+        ret = ff_h264_execute_decode_slices(h);
+        if (ret < 0 && (h->avctx->err_recognition & AV_EF_EXPLODE))
+            return ret;
+        sl = h->slice_ctx;
+    }
+
     first_slice = sl == h->slice_ctx &&
                   (!h->current_slice || view != h->cur_view);
 
@@ -2415,12 +2491,15 @@ int ff_h264_queue_decode_slice(H264Context *h, const H2645NAL *nal)
 
             if (view != h->cur_view) {
                 /* A new view of the same access unit: finish off the picture of
-                 * the view we were decoding and start a fresh one. */
+                 * the view we were decoding and start a fresh one. cur_pic_ptr is
+                 * deliberately left set, so that the block below reports the
+                 * picture as complete -- ff_h264_field_end() does not do so when
+                 * called with in_setup, and a frame thread waiting on it as a
+                 * reference would wait forever. */
                 if (h->cur_pic_ptr) {
                     ret = ff_h264_field_end(h, h->slice_ctx, 1);
                     if (ret < 0)
                         return ret;
-                    h->cur_pic_ptr = NULL;
                 }
                 h->current_slice = 0;
                 h->first_field   = 0;
@@ -2442,7 +2521,11 @@ int ff_h264_queue_decode_slice(H264Context *h, const H2645NAL *nal)
         }
 
         if (!h->first_field) {
-            if (h->cur_pic_ptr && !h->droppable) {
+            /* An inter-view reference need not be a temporal reference, so a
+             * disposable picture of this access unit may still be awaited by the
+             * view that follows it. Report those complete as well. */
+            if (h->cur_pic_ptr &&
+                (!h->droppable || h->views_active_decode != 1)) {
                 ff_thread_report_progress(&h->cur_pic_ptr->tf, INT_MAX,
                                           h->picture_structure == PICT_BOTTOM_FIELD);
             }
@@ -2864,7 +2947,12 @@ static void decode_finish_row(const H264Context *h, H264SliceContext *sl)
 
     ff_h264_draw_horiz_band(h, sl, top, height);
 
-    if (h->droppable || h->er.error_occurred)
+    /* A disposable picture is normally not worth reporting progress for, as
+     * nothing references it. An inter-view reference is the exception: it is
+     * available to the views above it whether or not it is a temporal
+     * reference, and they may be decoded from the same packet, so a dependent
+     * view slice can be waiting on these rows right now. */
+    if ((h->droppable && h->views_active_decode == 1) || h->er.error_occurred)
         return;
 
     ff_thread_report_progress(&h->cur_pic_ptr->tf, top + height - 1,
