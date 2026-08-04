@@ -565,6 +565,7 @@ static int get_last_needed_nal(H264Context *h)
          * can't start the next thread until we've read all of them */
         switch (nal->type) {
         case H264_NAL_SPS:
+        case H264_NAL_SUB_SPS:
         case H264_NAL_PPS:
             nals_needed = i;
             break;
@@ -705,6 +706,7 @@ static int decode_nal_units(H264Context *h, AVBufferRef *buf_ref,
 {
     AVCodecContext *const avctx = h->avctx;
     int nals_needed = 0; ///< number of NALs that need decoding before the next frame thread starts
+    unsigned views_scanned; ///< views_active_decode as seen by get_last_needed_nal()
     int idr_cleared=0;
     int dp_attached_to = -1; ///< index of the last partition B/C claimed
     int subset_sps_scanned = 0; ///< NALs before this were looked at for a subset SPS
@@ -742,6 +744,7 @@ static int decode_nal_units(H264Context *h, AVBufferRef *buf_ref,
         nals_needed = get_last_needed_nal(h);
     if (nals_needed < 0)
         return nals_needed;
+    views_scanned = h->views_active_decode;
 
     for (i = 0; i < h->pkt.nb_nals; i++) {
         H2645NAL *nal = &h->pkt.nals[i];
@@ -853,7 +856,27 @@ static int decode_nal_units(H264Context *h, AVBufferRef *buf_ref,
             if (nal->type == H264_NAL_DPA && queued)
                 dp_attached_to = h264_attach_partitions(h, queued, i);
 
+            /* The first slice of the base view can change the views being
+             * decoded, when it brings a new subset SPS into use or the caller
+             * selects views from get_format(). get_last_needed_nal() skipped the
+             * slices of views it did not know were wanted, so look again, or
+             * setup would be declared finished before they start. */
+            if (avctx->active_thread_type & FF_THREAD_FRAME &&
+                h->views_active_decode != views_scanned) {
+                views_scanned = h->views_active_decode;
+                nals_needed   = get_last_needed_nal(h);
+                if (nals_needed < 0) {
+                    ret = nals_needed;
+                    goto end;
+                }
+            }
+
             if (queued && h->current_slice == 1) {
+                /* current_slice returns to 1 for every view of the access unit
+                 * and get_last_needed_nal() counts the dependent view slices, so
+                 * nals_needed is the first slice of the last view: setup is
+                 * declared finished once every view of the access unit has
+                 * started, not at the base view. */
                 if (avctx->active_thread_type & FF_THREAD_FRAME &&
                     i >= nals_needed && !h->setup_finished && h->cur_pic_ptr) {
                     ret = h264_decode_late_sei(h, i);
@@ -1021,9 +1044,34 @@ end:
     }
 #endif /* CONFIG_ERROR_RESILIENCE */
     /* clean up */
-    if (h->cur_pic_ptr && !h->droppable && h->has_slice) {
+    /* As at a view switch: an inter-view reference need not be a temporal
+     * reference, so a disposable base view picture may still be awaited by a
+     * dependent view -- which, in a stream whose packets do not start on an
+     * access unit boundary, is decoded from the next packet and so by another
+     * frame thread. Report those complete too, or that thread waits forever. */
+    if (h->cur_pic_ptr && h->has_slice &&
+        (!h->droppable || h->views_active_decode != 1)) {
         ff_thread_report_progress(&h->cur_pic_ptr->tf, INT_MAX,
                                   h->picture_structure == PICT_BOTTOM_FIELD);
+    }
+    /* A packet holding more than one view completes all but the last of them at
+     * the view switch, which an error can leave unreached -- and then nothing
+     * ever completes that picture, so a frame thread awaiting it, as the frame
+     * num gap concealment does, waits forever. Complete them here as well. */
+    for (unsigned v = 0; h->nb_views > 1 && v < FF_ARRAY_ELEMS(h->views); v++) {
+        H264Picture *pic = h->views[v].cur_pic_ptr;
+
+        if (!pic || pic == h->cur_pic_ptr || !pic->f->buf[0])
+            continue;
+        /* Only pictures this packet started. Under frame threading the view
+         * that was not decoded from this packet holds the picture of the thread
+         * before, which that thread is still decoding into; completing it here
+         * would release a waiter onto rows that have not been written yet. */
+        if (pic->tf.owner[0] != h->avctx)
+            continue;
+
+        ff_thread_report_progress(&pic->tf, INT_MAX, 0);
+        ff_thread_report_progress(&pic->tf, INT_MAX, 1);
     }
 
     return (ret < 0) ? ret : buf_size;
@@ -1219,7 +1267,8 @@ static int finalize_frame(H264Context *h, H264Picture *out)
  * access unit share a POC and are presented together, so a dependent view picture
  * follows its base view partner immediately.
  */
-static int resolve_view_pair(H264Context *h, H264Picture *base, int output)
+int ff_h264_resolve_view_pair(H264Context *h, H264Picture *base, int output,
+                              int defer)
 {
     if (!base || h->nb_views < 2)
         return 0;
@@ -1247,9 +1296,18 @@ static int resolve_view_pair(H264Context *h, H264Picture *base, int output)
             dep->f->pts      = base->f->pts;
             dep->f->pkt_dts  = base->f->pkt_dts;
             dep->f->duration = base->f->duration;
-            ret = finalize_frame(h, dep);
-            if (ret < 0)
-                return ret;
+            /* A dependent view picture follows its base view partner. Deferring is
+             * only needed while that partner is still waiting to be copied out at
+             * the end of the packet; once it has gone, emitting immediately is both
+             * correct and the only option, as there is no second slot to defer into
+             * and ::next_output_pic_dep does not survive the next base view picture. */
+            if (defer && base == h->next_output_pic) {
+                h->next_output_pic_dep = dep;
+            } else {
+                ret = finalize_frame(h, dep);
+                if (ret < 0)
+                    return ret;
+            }
         }
     }
 
@@ -1291,7 +1349,7 @@ static int send_delayed_frames(H264Context *h)
             ret = finalize_frame(h, out);
             if (ret < 0)
                 return ret;
-            ret = resolve_view_pair(h, out, 1);
+            ret = ff_h264_resolve_view_pair(h, out, 1, 0);
             if (ret < 0)
                 return ret;
         }
@@ -1365,18 +1423,19 @@ static int h264_decode_packet(AVCodecContext *avctx, AVPacket *avpkt)
                 return ret;
         }
 
-        /* A base view picture that left the reorder buffer without being output
-         * still has to let go of its dependent views, or they accumulate in the
-         * DPB until it runs dry. */
-        ret = resolve_view_pair(h, h->pending_pair_pic,
-                                h->pending_pair_pic == h->next_output_pic);
-        h->pending_pair_pic = NULL;
+        /* Both views of an access unit share a POC and are presented together,
+         * so the dependent view follows its base view partner immediately. */
+        if (h->next_output_pic_dep) {
+            ret = finalize_frame(h, h->next_output_pic_dep);
+            if (ret < 0)
+                return ret;
+        }
+
         /* Handed over; the hold release_unused_pictures() keeps on it must end
          * here, or the next packet's frame_start() sees a stale pointer and
          * leaves the picture occupying a DPB slot for another access unit. */
-        h->next_output_pic = NULL;
-        if (ret < 0)
-            return ret;
+        h->next_output_pic     = NULL;
+        h->next_output_pic_dep = NULL;
     }
 
     ff_h264_unref_picture(&h->last_pic_for_ec);
