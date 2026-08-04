@@ -8881,6 +8881,129 @@ static int mov_read_hvce(MOVContext *c, AVIOContext *pb, MOVAtom atom)
     return 0;
 }
 
+/* Walk count length-prefixed NAL units starting at off, returning the offset
+ * just past them, or a negative value if they do not fit. */
+static int mov_avcc_skip_nals(const uint8_t *buf, int size, int off, int count)
+{
+    for (int i = 0; i < count; i++) {
+        if (off < 0 || off + 2 > size)
+            return AVERROR_INVALIDDATA;
+        off += 2 + AV_RB16(buf + off);
+        if (off > size)
+            return AVERROR_INVALIDDATA;
+    }
+    return off;
+}
+
+/* MVCDecoderConfigurationRecord, ISO/IEC 14496-15 section 7.3.4. It has the
+ * same layout as the AVCDecoderConfigurationRecord in avcC, but its parameter
+ * set arrays carry the subset SPS of the multiview extension and the picture
+ * parameter sets that reference it.
+ *
+ * Merge them into the avcC extradata rather than exporting them separately: the
+ * decoder walks the arrays and dispatches on the NAL unit type it finds there,
+ * so a subset SPS sitting in the sequence parameter set array is handled. */
+static int mov_read_mvcc(MOVContext *c, AVIOContext *pb, MOVAtom atom)
+{
+    AVStream *st;
+    uint8_t *buf, *ext, *out;
+    int ret, size;
+    int nb_sps, nb_pps, e_nb_sps, e_nb_pps;
+    int sps_end, pps_end, e_sps_end, e_pps_end, e_size, out_size;
+
+    if (c->fc->nb_streams < 1)
+        return 0;
+    st = c->fc->streams[c->fc->nb_streams - 1];
+
+    /* avcC is required first; a file that orders them the other way round simply
+     * decodes the base view, as it did before. */
+    if (st->codecpar->extradata_size < 7 || st->codecpar->extradata[0] != 1)
+        return 0;
+    /* Range check before narrowing, as elsewhere in this file: a box larger than
+     * INT_MAX would otherwise be truncated into the check rather than rejected. */
+    if (atom.size < 7 ||
+        (uint64_t)atom.size > INT_MAX - AV_INPUT_BUFFER_PADDING_SIZE)
+        return AVERROR_INVALIDDATA;
+    size = atom.size;
+
+    buf = av_malloc(size + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (!buf)
+        return AVERROR(ENOMEM);
+    memset(buf + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+    if (ffio_read_size(pb, buf, size) < 0) {
+        av_log(c->fc, AV_LOG_WARNING, "mvcC atom truncated\n");
+        av_free(buf);
+        return 0;
+    }
+    if (buf[0] != 1) {
+        av_log(c->fc, AV_LOG_WARNING, "unsupported mvcC version %d\n", buf[0]);
+        av_free(buf);
+        return 0;
+    }
+
+    ext    = st->codecpar->extradata;
+    e_size = st->codecpar->extradata_size;
+
+    /* mvcC spends a reserved bit and seven on numOfSequenceParameterSets, where
+     * avcC has three reserved bits and five (14496-15 7.3.4 against 5.3.3.1). */
+    nb_sps    = buf[5] & 0x7f;
+    e_nb_sps  = ext[5] & 0x1f;
+    sps_end   = mov_avcc_skip_nals(buf, size,   6, nb_sps);
+    e_sps_end = mov_avcc_skip_nals(ext, e_size, 6, e_nb_sps);
+    if (sps_end < 0 || e_sps_end < 0 || sps_end >= size || e_sps_end >= e_size)
+        goto invalid;
+
+    nb_pps    = buf[sps_end];
+    e_nb_pps  = ext[e_sps_end];
+    pps_end   = mov_avcc_skip_nals(buf, size,   sps_end   + 1, nb_pps);
+    e_pps_end = mov_avcc_skip_nals(ext, e_size, e_sps_end + 1, e_nb_pps);
+    if (pps_end < 0 || e_pps_end < 0)
+        goto invalid;
+
+    /* the counts are 5 and 8 bits wide */
+    if (e_nb_sps + nb_sps > 31 || e_nb_pps + nb_pps > 255) {
+        av_log(c->fc, AV_LOG_WARNING, "too many parameter sets to merge mvcC\n");
+        av_free(buf);
+        return 0;
+    }
+
+    out_size = e_size + (pps_end - 6) - 1;
+    out = av_mallocz(out_size + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (!out) {
+        av_free(buf);
+        return AVERROR(ENOMEM);
+    }
+
+    ret = 0;
+    memcpy(out, ext, 6);
+    out[5] = (ext[5] & 0xe0) | (e_nb_sps + nb_sps);
+    ret += 6;
+    memcpy(out + ret, ext + 6, e_sps_end - 6);          ret += e_sps_end - 6;
+    memcpy(out + ret, buf + 6, sps_end - 6);            ret += sps_end - 6;
+    out[ret++] = e_nb_pps + nb_pps;
+    memcpy(out + ret, ext + e_sps_end + 1, e_pps_end - e_sps_end - 1);
+    ret += e_pps_end - e_sps_end - 1;
+    memcpy(out + ret, buf + sps_end + 1, pps_end - sps_end - 1);
+    ret += pps_end - sps_end - 1;
+    /* whatever trailed the avcC arrays, the profile specific extension included */
+    memcpy(out + ret, ext + e_pps_end, e_size - e_pps_end);
+    ret += e_size - e_pps_end;
+    av_assert0(ret == out_size);
+
+    av_free(st->codecpar->extradata);
+    st->codecpar->extradata      = out;
+    st->codecpar->extradata_size = out_size;
+    st->disposition             |= AV_DISPOSITION_MULTILAYER;
+
+    av_free(buf);
+    return 0;
+
+invalid:
+    av_log(c->fc, AV_LOG_WARNING, "malformed mvcC atom, ignoring\n");
+    av_free(buf);
+    return 0;
+}
+
 static int mov_read_lhvc(MOVContext *c, AVIOContext *pb, MOVAtom atom)
 {
     AVStream *st;
@@ -9868,6 +9991,7 @@ static const MOVParseTableEntry mov_default_parse_table[] = {
 { MKTAG('i','i','n','f'), mov_read_iinf },
 { MKTAG('a','m','v','e'), mov_read_amve }, /* ambient viewing environment box */
 { MKTAG('l','h','v','C'), mov_read_lhvc },
+{ MKTAG('m','v','c','C'), mov_read_mvcc },
 { MKTAG('l','v','c','C'), mov_read_glbl },
 { MKTAG('a','p','v','C'), mov_read_glbl },
 #if CONFIG_IAMFDEC
