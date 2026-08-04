@@ -121,7 +121,16 @@ static void release_unused_pictures(H264Context *h, int remove_current)
 
     /* release non reference frames */
     for (i = 0; i < H264_MAX_PICTURE_COUNT; i++) {
-        if (h->DPB[i].f->buf[0] && !h->DPB[i].reference &&
+        int pending = 0;
+
+        /* a view left half way through a complementary field pair still owns its
+         * first field, and h->cur_pic_ptr does not point at it while the other
+         * view is being decoded */
+        for (int v = 0; v < FF_ARRAY_ELEMS(h->views); v++)
+            if (h->views[v].pending_field_pic == &h->DPB[i])
+                pending = 1;
+
+        if (h->DPB[i].f->buf[0] && !h->DPB[i].reference && !pending &&
             &h->DPB[i] != h->next_output_pic &&
             &h->DPB[i] != h->next_output_pic_dep &&
             /* A base view picture that has left the reorder buffer is still needed
@@ -541,6 +550,13 @@ int ff_h264_update_thread_context(AVCodecContext *dst,
         copy_picture_range(v->long_ref, v1->long_ref,
                            FF_ARRAY_ELEMS(v->long_ref), h, h1);
         v->cur_pic_ptr = REBASE_PICTURE(v1->cur_pic_ptr, h, h1);
+
+        /* a view may be half way through a complementary field pair */
+        v->pending_field_pic  = REBASE_PICTURE(v1->pending_field_pic, h, h1);
+        v->first_field        = v1->first_field;
+        v->picture_structure  = v1->picture_structure;
+        v->droppable          = v1->droppable;
+        v->missing_fields     = v1->missing_fields;
     }
 
     h->frame_recovered       = h1->frame_recovered;
@@ -2007,6 +2023,7 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
     h->cur_pic_ptr->base_view_pic = (h->cur_view && h->views[0].cur_pic_ptr) ?
                                     h->views[0].cur_pic_ptr - h->DPB : -1;
 
+
     h->cur_pic_ptr->f->flags |= AV_FRAME_FLAG_KEY * !!(ff_h264_nal_is_idr(nal));
 
     if (ff_h264_nal_is_idr(nal)) {
@@ -2510,13 +2527,25 @@ int ff_h264_queue_decode_slice(H264Context *h, const H2645NAL *nal)
                  * called with in_setup, and a frame thread waiting on it as a
                  * reference would wait forever. */
                 if (h->cur_pic_ptr) {
+                    /* Also for a first field: its reference picture marking has
+                     * to happen before the other view runs, or the second field
+                     * will not find it at the head of short_ref and will enter a
+                     * second short term entry for the same frame. */
                     ret = ff_h264_field_end(h, h->slice_ctx, 1);
                     if (ret < 0)
                         return ret;
                 }
                 h->current_slice = 0;
-                h->first_field   = 0;
-                ff_h264_view_switch(h, view);
+                /* A field coded access unit carries one field of each view, so
+                 * the view being left may be half way through a complementary
+                 * pair. Keep its first_field set: ff_h264_view_switch() stashes
+                 * the pending picture with it and hands both back when that
+                 * view's second field arrives. */
+                if (!(FIELD_PICTURE(h) && h->first_field))
+                    h->first_field = 0;
+                ret = ff_h264_view_switch_fields(h, view);
+                if (ret < 0)
+                    return ret;
             } else if (h->cur_pic_ptr && FIELD_PICTURE(h) && h->first_field) {
                 ret = ff_h264_field_end(h, h->slice_ctx, 1);
                 if (ret < 0)
@@ -2551,8 +2580,11 @@ int ff_h264_queue_decode_slice(H264Context *h, const H2645NAL *nal)
 
     /* Returning to the base view for a new access unit, or starting a view whose
      * predecessor produced no picture. */
-    if (!h->current_slice)
-        ff_h264_view_switch(h, view);
+    if (!h->current_slice) {
+        ret = ff_h264_view_switch_fields(h, view);
+        if (ret < 0)
+            return ret;
+    }
 
     if (h->current_slice == 0 && !h->first_field) {
         if (

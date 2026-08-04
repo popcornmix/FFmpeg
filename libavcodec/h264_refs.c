@@ -766,6 +766,51 @@ int ff_h264_view_idx(const H264Context *h, int view_id)
     return AVERROR_INVALIDDATA;
 }
 
+/* The field pair state has to follow the view too, but only when the switch is
+ * part of decoding a slice: idr() and the frame thread hand-over walk the views
+ * for their own reasons and must not disturb the picture being decoded. */
+int ff_h264_view_switch_fields(H264Context *h, unsigned view)
+{
+    H264ViewContext *out, *in;
+    int ret;
+
+    if (view == h->cur_view)
+        return 0;
+
+    out = &h->views[h->cur_view];
+    out->first_field       = h->first_field;
+    out->picture_structure = h->picture_structure;
+    out->droppable         = h->droppable;
+    out->missing_fields    = h->missing_fields;
+    out->pending_field_pic = h->first_field ? h->cur_pic_ptr : NULL;
+
+    in  = &h->views[view];
+    ff_h264_view_switch(h, view);
+
+    h->first_field       = in->first_field;
+    h->picture_structure = in->picture_structure;
+    h->droppable         = in->droppable;
+    h->missing_fields    = in->missing_fields;
+    h->cur_pic_ptr       = in->pending_field_pic;
+
+    /* h->cur_pic is a reference to the picture being decoded into, refreshed by
+     * h264_frame_start() -- which the second field of a complementary pair does
+     * not go through. Rebind it to the view being switched to, or that field
+     * would be decoded into whichever view started a picture most recently. */
+    ff_h264_unref_picture(&h->cur_pic);
+    if (h->cur_pic_ptr) {
+        ret = ff_h264_ref_picture(&h->cur_pic, h->cur_pic_ptr);
+        if (ret < 0)
+            return ret;
+        for (int i = 0; i < h->nb_slice_ctx; i++) {
+            h->slice_ctx[i].linesize   = h->cur_pic_ptr->f->linesize[0];
+            h->slice_ctx[i].uvlinesize = h->cur_pic_ptr->f->linesize[1];
+        }
+    }
+
+    return 0;
+}
+
 void ff_h264_view_switch(H264Context *h, unsigned view)
 {
     H264ViewContext *v;
@@ -849,6 +894,7 @@ int ff_h264_execute_ref_pic_marking(H264Context *h)
     if (!h->explicit_ref_marking)
         generate_sliding_window_mmcos(h);
     mmco_count = h->nb_mmco;
+
 
     if ((h->avctx->debug & FF_DEBUG_MMCO) && mmco_count == 0)
         av_log(h->avctx, AV_LOG_DEBUG, "no mmco here\n");

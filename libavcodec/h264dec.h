@@ -381,6 +381,18 @@ typedef struct H264ViewContext {
      * it stays valid across a view switch.
      */
     H264Picture    *cur_pic_ptr;
+
+    /**
+     * Field pair state, swapped like the fields above. A field coded access unit
+     * carries one field of each view, so a view is left half way through a
+     * complementary pair whenever the next view starts, and each view has to
+     * remember its own pending field.
+     */
+    H264Picture    *pending_field_pic;
+    int             first_field;
+    int             picture_structure;
+    int             droppable;
+    int             missing_fields;
 } H264ViewContext;
 
 /**
@@ -751,6 +763,7 @@ int ff_h264_resolve_view_pair(H264Context *h, H264Picture *base, int output,
  * already current is a no-op.
  */
 void ff_h264_view_switch(H264Context *h, unsigned view);
+int ff_h264_view_switch_fields(H264Context *h, unsigned view);
 
 /**
  * Map a view_id onto its view order index (VOIdx), i.e. its position in the
