@@ -955,6 +955,19 @@ static int setup_multiview(H264Context *h, const SPS *mvc_sps)
         return AVERROR_BUG;
     }
 
+    /* No hwaccel knows about views. They all build the accelerator's picture
+     * list from short_ref/long_ref, skipping anything with reference == 0, while
+     * an inter-view reference lives in sl->ref_list[] alone and need not be a
+     * temporal reference at all. A dependent view slice would therefore point at
+     * a surface the accelerator was never told about. Decode the base view only
+     * rather than submit that. */
+    if (views_active_output != 1 && h->avctx->hwaccel) {
+        av_log(h->avctx, AV_LOG_WARNING,
+               "Multiview decoding is not supported with hardware acceleration; "
+               "decoding the base view only.\n");
+        return 0;
+    }
+
     highest_view = av_log2(views_active_output);
     if (highest_view >= H264_MAX_MVC_VIEWS) {
         av_log(h->avctx, AV_LOG_ERROR, "Too many views requested: %x\n",
