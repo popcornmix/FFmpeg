@@ -514,6 +514,7 @@ static int h264_frame_start(H264Context *h)
     pic->mmco_reset  = 0;
     pic->recovered   = 0;
     pic->invalid_gap = 0;
+    pic->gap_frame   = 0;
     pic->sei_recovery_frame_cnt = h->sei.recovery_point.recovery_frame_cnt;
 
     pic->f->pict_type = h->slice_ctx[0].slice_type;
@@ -1518,6 +1519,19 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
     while (h->poc.frame_num != h->poc.prev_frame_num && !h->first_field &&
            h->poc.frame_num != (h->poc.prev_frame_num + 1) % (1 << sps->log2_max_frame_num)) {
         const H264Picture *prev = h->short_ref_count ? h->short_ref[0] : NULL;
+        /* Only conceal from a picture that is certain to be reported.
+         * ::reference collects the field bits as each field is marked, so
+         * anything short of a whole frame is either a field pair whose second
+         * field never arrived or a picture that is no reference at all -- and
+         * the end of decode_nal_units() reports neither. Corrupt input reaches
+         * both, and awaiting one waits for a field that will never be decoded.
+         * Fall through to the colour fill instead. A picture made by this very
+         * loop is reported whole when it is made, although marked as a single
+         * field in a field coded stream. Taken here, as the marking below may
+         * drop prev from the reference lists altogether; masked, as ::reference
+         * also carries DELAYED_PIC_REF. */
+        const int prev_complete = prev && (prev->gap_frame ||
+                                           (prev->reference & PICT_FRAME) == PICT_FRAME);
         av_log(h->avctx, AV_LOG_DEBUG, "Frame num gap %d %d\n",
                h->poc.frame_num, h->poc.prev_frame_num);
         if (!sps->gaps_in_frame_num_allowed_flag)
@@ -1533,6 +1547,7 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
         h->poc.prev_frame_num        %= 1 << sps->log2_max_frame_num;
         h->cur_pic_ptr->frame_num = h->poc.prev_frame_num;
         h->cur_pic_ptr->invalid_gap = !sps->gaps_in_frame_num_allowed_flag;
+        h->cur_pic_ptr->gap_frame   = 1;
         ff_thread_report_progress(&h->cur_pic_ptr->tf, INT_MAX, 0);
         ff_thread_report_progress(&h->cur_pic_ptr->tf, INT_MAX, 1);
 
@@ -1555,7 +1570,7 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
                 -1
             };
 
-            if (prev &&
+            if (prev_complete &&
                 h->short_ref[0]->f->width == prev->f->width &&
                 h->short_ref[0]->f->height == prev->f->height &&
                 h->short_ref[0]->f->format == prev->f->format) {

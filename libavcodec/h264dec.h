@@ -150,6 +150,7 @@ typedef struct H264Picture {
     int reference;
     int recovered;          ///< picture at IDR or recovery point + recovery count
     int invalid_gap;
+    int gap_frame;          ///< frame num gap concealment picture, both fields reported at once
     int sei_recovery_frame_cnt;
     int needs_fg;           ///< whether picture needs film grain synthesis (see `f_grain`)
 
