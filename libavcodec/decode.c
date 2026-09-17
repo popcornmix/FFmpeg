@@ -85,6 +85,13 @@ typedef struct DecodeContext {
      */
     int draining_started;
 
+    /**
+     * Error from the decoding attempt made by avcodec_send_packet() while
+     * the packet it was given was still buffered, to be reported from
+     * avcodec_receive_frame().
+     */
+    int deferred_error;
+
     int64_t pts_correction_num_faulty_pts; /// Number of incorrect PTS values so far
     int64_t pts_correction_num_faulty_dts; /// Number of incorrect DTS values so far
     int64_t pts_correction_last_pts;       /// PTS of the last frame
@@ -753,8 +760,18 @@ int attribute_align_arg avcodec_send_packet(AVCodecContext *avctx, const AVPacke
 
     if (!avci->buffer_frame->buf[0] && !dc->draining_started) {
         ret = decode_receive_frame_internal(avctx, avci->buffer_frame, 0);
-        if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
-            return ret;
+        if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
+            /* With the packet just given still buffered, the decoder failed
+             * on input it had been holding -- a bitstream filter splitting
+             * packets keeps some back -- and has yet to see the new one. A
+             * caller takes an error here as the packet having been consumed
+             * and sends the next, which would be refused with EAGAIN. Report
+             * it from avcodec_receive_frame() instead, where the next attempt
+             * would have. */
+            if (AVPACKET_IS_EMPTY(avci->buffer_pkt))
+                return ret;
+            dc->deferred_error = ret;
+        }
     }
 
     return 0;
@@ -817,10 +834,15 @@ fail:
 int ff_decode_receive_frame(AVCodecContext *avctx, AVFrame *frame, unsigned flags)
 {
     AVCodecInternal *avci = avctx->internal;
+    DecodeContext     *dc = decode_ctx(avci);
     int ret;
 
     if (avci->buffer_frame->buf[0]) {
         av_frame_move_ref(frame, avci->buffer_frame);
+    } else if (dc->deferred_error) {
+        ret = dc->deferred_error;
+        dc->deferred_error = 0;
+        return ret;
     } else {
         ret = decode_receive_frame_internal(avctx, frame, flags);
         if (ret < 0)
@@ -2380,6 +2402,7 @@ av_cold void ff_decode_flush_buffers(AVCodecContext *avctx)
 
     dc->nb_draining_errors = 0;
     dc->draining_started   = 0;
+    dc->deferred_error     = 0;
 }
 
 av_cold AVCodecInternal *ff_decode_internal_alloc(void)
