@@ -494,6 +494,17 @@ ffmpeg -i INPUT.mp4 -codec copy -bsf:v h264_mp4toannexb OUTPUT.ts
 Please note that this filter is auto-inserted for MPEG-TS (muxer
 @code{mpegts}) and raw H.264 (muxer @code{h264}) output formats.
 
+@section h264_mvc_split
+
+Split an H.264 MVC (Annex H) access unit into one packet per view. The
+packet is cut wherever the view of its coded slices changes; non-VCL NAL
+units go with the view they precede. A packet carrying a single view is
+passed through unchanged.
+
+The @code{h264} decoder inserts this filter automatically, so that under
+frame threading the base view and the dependent views of an access unit
+are decoded by different threads.
+
 @section h264_redundant_pps
 
 This applies a specific fixup to some Blu-ray BDMV H264 streams

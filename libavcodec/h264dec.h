@@ -701,6 +701,11 @@ typedef struct H264Context {
      * otherwise refill the state just cleared.
      */
     int idr_pending;
+    /**
+     * What the h264_mvc_split bitstream filter was last told: 0 nothing yet,
+     * 1 not to split, 2 to split. See ff_h264_mvc_split_setup().
+     */
+    int mvc_split_state;
     /** Bitmasks of VOIdx that are decoded / output. Bit 0 (base view) is always set. */
     unsigned views_active_decode;
     unsigned views_active_output;
@@ -823,6 +828,15 @@ int ff_h264_exten_slice_sps_id(const H264ParamSets *ps, const H2645NAL *slice,
  * Reset all per-view state, as at an IDR or a flush.
  */
 void ff_h264_view_reset(H264Context *h);
+
+/**
+ * Tell the h264_mvc_split bitstream filter in front of the decoder whether to
+ * cut access units into one packet per view, which is only worth it when more
+ * than the base view is being decoded. Must be called on the context that
+ * feeds the filter: the user facing one, under frame threading.
+ */
+void ff_h264_mvc_split_setup(AVCodecContext *avctx, H264Context *h,
+                             unsigned views_active_decode);
 
 /**
  * Execute the reference picture marking (memory management control operations).

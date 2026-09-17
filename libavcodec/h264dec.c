@@ -40,6 +40,7 @@
 #include "libavutil/thread.h"
 #include "libavutil/video_enc_params.h"
 
+#include "bsf.h"
 #include "codec_internal.h"
 #include "decode.h"
 #include "internal.h"
@@ -1388,6 +1389,20 @@ static int send_delayed_frames(H264Context *h)
     return 0;
 }
 
+void ff_h264_mvc_split_setup(AVCodecContext *avctx, H264Context *h,
+                             unsigned views_active_decode)
+{
+    AVBSFContext *bsf = avctx->internal->bsf;
+    int split = views_active_decode > 1;
+
+    if (h->mvc_split_state == 1 + split || !bsf ||
+        strcmp(bsf->filter->name, "h264_mvc_split"))
+        return;
+
+    av_opt_set_int(bsf->priv_data, "split", split, 0);
+    h->mvc_split_state = 1 + split;
+}
+
 static int h264_decode_packet(AVCodecContext *avctx, AVPacket *avpkt)
 {
     const uint8_t *buf = avpkt->data;
@@ -1421,6 +1436,10 @@ static int h264_decode_packet(AVCodecContext *avctx, AVPacket *avpkt)
     buf_index = decode_nal_units(h, avpkt->buf, buf, buf_size);
     if (buf_index < 0)
         return AVERROR_INVALIDDATA;
+
+    /* Under frame threading this runs on a worker, whose filter is unused;
+     * the main context is told in ff_h264_update_thread_context_for_user(). */
+    ff_h264_mvc_split_setup(avctx, h, h->views_active_decode);
 
     if (!h->cur_pic_ptr && h->nal_unit_type == H264_NAL_END_SEQUENCE) {
         av_assert0(buf_index <= buf_size);
@@ -1480,27 +1499,30 @@ static int h264_receive_frame(AVCodecContext *avctx, AVFrame *frame)
 
     h->pkt_dts = AV_NOPTS_VALUE;
 
-    if (av_container_fifo_can_read(h->output_fifo))
-        goto do_output;
+    /* Keep going while a packet yields no frame. h264_mvc_split hands the
+     * views of an access unit over as separate packets, and the caller's
+     * packet is not taken from it until those have all been used up; EAGAIN
+     * before then would tell the caller to send the next one, which would be
+     * refused. */
+    while (!av_container_fifo_can_read(h->output_fifo)) {
+        av_packet_unref(avpkt);
+        ret = ff_decode_get_packet(avctx, avpkt);
+        if (ret == AVERROR_EOF) {
+            /* end of stream, output what is still held for reordering */
+            ret = send_delayed_frames(h);
+            if (ret < 0)
+                return ret;
+            break;
+        } else if (ret < 0)
+            return ret;
 
-    av_packet_unref(avpkt);
-    ret = ff_decode_get_packet(avctx, avpkt);
-    if (ret == AVERROR_EOF) {
-        /* end of stream, output what is still held for reordering */
-        ret = send_delayed_frames(h);
+        h->pkt_dts = avpkt->dts;
+
+        ret = h264_decode_packet(avctx, avpkt);
         if (ret < 0)
             return ret;
-        goto do_output;
-    } else if (ret < 0)
-        return ret;
+    }
 
-    h->pkt_dts = avpkt->dts;
-
-    ret = h264_decode_packet(avctx, avpkt);
-    if (ret < 0)
-        return ret;
-
-do_output:
     if (av_container_fifo_read(h->output_fifo, frame, 0) >= 0)
         return 0;
 
@@ -1548,6 +1570,11 @@ const FFCodec ff_h264_decoder = {
     .init                  = h264_decode_init,
     .close                 = h264_decode_end,
     FF_CODEC_RECEIVE_FRAME_CB(h264_receive_frame),
+    /* One packet per view, so that under frame threading the views of an
+     * access unit are decoded by different threads: a thread declares its
+     * setup finished once it has started a picture, which with both views in
+     * one packet is only after the whole base view has been decoded. */
+    .bsfs                  = "h264_mvc_split",
     .p.capabilities        = AV_CODEC_CAP_DR1 |
                              AV_CODEC_CAP_DELAY | AV_CODEC_CAP_SLICE_THREADS |
                              AV_CODEC_CAP_FRAME_THREADS,

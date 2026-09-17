@@ -19,6 +19,7 @@ OBJS-$(CONFIG_EXTRACT_EXTRADATA_BSF)      += bsf/extract_extradata.o
 OBJS-$(CONFIG_FILTER_UNITS_BSF)           += bsf/filter_units.o
 OBJS-$(CONFIG_H264_METADATA_BSF)          += bsf/h264_metadata.o
 OBJS-$(CONFIG_H264_MP4TOANNEXB_BSF)       += bsf/h264_mp4toannexb.o
+OBJS-$(CONFIG_H264_MVC_SPLIT_BSF)         += bsf/h264_mvc_split.o
 OBJS-$(CONFIG_H264_REDUNDANT_PPS_BSF)     += bsf/h264_redundant_pps.o
 OBJS-$(CONFIG_HAPQA_EXTRACT_BSF)          += bsf/hapqa_extract.o
 OBJS-$(CONFIG_HEVC_METADATA_BSF)          += bsf/h265_metadata.o

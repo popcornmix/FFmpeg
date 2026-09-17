@@ -618,6 +618,8 @@ int ff_h264_update_thread_context_for_user(AVCodecContext *dst,
     h->is_avc = h1->is_avc;
     h->nal_length_size = h1->nal_length_size;
 
+    ff_h264_mvc_split_setup(dst, h, h1->views_active_decode);
+
     return 0;
 }
 
