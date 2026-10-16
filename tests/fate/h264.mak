@@ -246,6 +246,10 @@ FATE_H264-$(call FRAMECRC, MXF, H264, PCM_S24LE_DECODER SCALE_FILTER ARESAMPLE_F
 FATE_H264-$(call FRAMECRC, MOV, H264) += fate-h264-attachment-631
 FATE_H264-$(call FRAMECRC, MPEGTS, H264, H264_PARSER MP3_DECODER SCALE_FILTER ARESAMPLE_FILTER) += fate-h264-skip-nokey
 FATE_H264-$(call FRAMECRC, MPEGTS, H264, H264_PARSER MP3_DECODER SCALE_FILTER ARESAMPLE_FILTER EXTRACT_EXTRADATA_BSF) += fate-h264-skip-nointra
+
+# a lone non-IDR first field with frame_num 0, its second field lost, ahead of an
+# IDR field of the opposite parity, which must not be decoded as its second field
+FATE_H264-$(call FRAMECRC, H264, H264, H264_PARSER CONCAT_PROTOCOL SUBFILE_PROTOCOL) += fate-h264-field-before-idr
 FATE_H264_FFPROBE-$(call DEMDEC, MATROSKA, H264) += fate-h264-dts_5frames
 FATE_H264_FFPROBE-$(call PARSERDEMDEC, H264, H264, H264) += fate-h264-afd
 
@@ -473,6 +477,9 @@ fate-h264-ref-pic-mod-overflow:                   CMD = framecrc -i $(TARGET_SAM
 fate-h264-twofields-packet:                       CMD = framecrc -i $(TARGET_SAMPLES)/h264/twofields_packet.mp4 -an -frames 30
 fate-h264-unescaped-extradata:                    CMD = framecrc -i $(TARGET_SAMPLES)/h264/unescaped_extradata.mp4 -an -frames 10
 fate-h264-3386:                                   CMD = framecrc -i $(TARGET_SAMPLES)/h264/bbc2.sample.h264
+# the SPS and PPS, then the non-IDR bottom field following the IDR, then the whole stream
+fate-h264-field-before-idr:                       CMD = framecrc -i "concat:subfile,,start,0,end,25,,:$(TARGET_SAMPLES)/h264-conformance/Sharp_MP_Field_1_B.jvt|subfile,,start,21791,end,30749,,:$(TARGET_SAMPLES)/h264-conformance/Sharp_MP_Field_1_B.jvt|$(TARGET_SAMPLES)/h264-conformance/Sharp_MP_Field_1_B.jvt"
+fate-h264-field-before-idr:                       REF = $(SRC_PATH)/tests/ref/fate/h264-conformance-sharp_mp_field_1_b
 fate-h264-missing-frame:                          CMD = framecrc -i $(TARGET_SAMPLES)/h264/nondeterministic_cut.h264
 fate-h264-timecode:                               CMD = framecrc -i $(TARGET_SAMPLES)/h264/crew_cif_timecode-2.h264
 

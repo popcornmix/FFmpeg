@@ -1413,6 +1413,7 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
     const SPS *sps;
 
     int last_pic_structure, last_pic_droppable, ret;
+    int idr_unpaired;
 
     ret = h264_init_ps(h, sl, first_slice);
     if (ret < 0)
@@ -1459,6 +1460,16 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
         }
     }
 
+    /* An IDR picture is never the second field of a complementary reference
+     * field pair (3.37), so an IDR field cannot complete a first field that was
+     * not itself IDR: that one precedes the IDR and so belongs to the previous
+     * coded video sequence. Its second field was lost, and resuming it would
+     * decode the IDR into the picture of a field that is about to be marked
+     * unused. Both fields coded as IDR is not conforming either, but is seen in
+     * the wild and keeps being paired. */
+    idr_unpaired = h->first_field && nal->type == H264_NAL_IDR_SLICE &&
+                   !(h->cur_pic_ptr->f->flags & AV_FRAME_FLAG_KEY);
+
     /* See if we have a decoded first field looking for a pair...
      * Here, we're using that to see if we should mark previously
      * decode frames as "finished".
@@ -1484,7 +1495,7 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
                                           last_pic_structure == PICT_TOP_FIELD);
             }
         } else {
-            if (h->cur_pic_ptr->frame_num != h->poc.frame_num) {
+            if (h->cur_pic_ptr->frame_num != h->poc.frame_num || idr_unpaired) {
                 /* This and previous field were reference, but had
                  * different frame_nums. Consider this field first in
                  * pair. Throw away previous field except for reference
@@ -1628,7 +1639,7 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
             h->first_field = FIELD_PICTURE(h);
         } else {
             h->missing_fields = 0;
-            if (h->cur_pic_ptr->frame_num != h->poc.frame_num) {
+            if (h->cur_pic_ptr->frame_num != h->poc.frame_num || idr_unpaired) {
                 ff_thread_report_progress(&h->cur_pic_ptr->tf, INT_MAX,
                                           h->picture_structure==PICT_BOTTOM_FIELD);
                 /* This and the previous field had different frame_nums.
